@@ -1,0 +1,20 @@
+# Generated experiment artifacts and model checkpoints.
+/results/
+/system/logger/
+/system/items/
+/system/models/
+
+# Generated client datasets.  Keep the top-level generator scripts and
+# dataset/utils source code so a clone can regenerate these files locally.
+/dataset/*/
+!/dataset/utils/
+!/dataset/utils/**
+
+# LEAF keeps downloaded/generated corpus shards below its utility package.
+# They are datasets rather than framework source and must stay out of Git.
+/dataset/utils/LEAF/data/
+
+# Python bytecode and test/cache artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
