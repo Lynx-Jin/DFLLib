@@ -113,7 +113,7 @@ python main.py -algo FedSGD -fopt adam -flr 0.001 -data MNIST_100 -m FedAvgMLP \
 | `bulyan` | 先用 Multi-Krum 选 `n-2f` 个候选；每一坐标保留最接近候选中位数的 `n-4f` 个值并平均。 | 要求 `n >= 4f+3`；例如 `n=100,f=25` **不合法**。 |
 | `trimmedmean` | 每一坐标排序，删去两端各 `f` 个值，平均中间值。 | 要求 `n > 2f`。 |
 | `median` | 每一坐标取中位数。 | 使用 `-rmar` 统一记录预算；不依赖客户端整体筛除。 |
-| `cosine_cluster` | 对 `cos(u_i, sum_j w_j u_j)` 做一维二均值聚类，聚合余弦均值较高簇。 | AFA-style 基线，不是 AFA 的精确复现；`-cciter`、`-cctol`。 |
+| `cosine_cluster` | 对 `cos(u_i, sum_j w_j u_j)` 做一维二均值聚类；可按余弦均值或簇大小选择保留簇。 | AFA-style 基线，不是 AFA 的精确复现；`-ccselect {high_mean,largest_cluster}`、`-cciter`、`-cctol`。 |
 | `dnc` | 随机抽坐标、中心化、SVD；删除首右奇异向量投影平方最大的更新。实现直接从参数张量 gather 抽样坐标，不先构造完整客户端更新矩阵。 | `-dmar`、`-df`、`-di`、`-db`、`-dseed`。 |
 
 `-rmar` 是 Krum/Multi-Krum/Bulyan/Trimmed Mean/Median 的公开防御预算；`-dmar` 是 DnC 的独立预算。两者均不是攻击真值 `-amr`。实验若使其相等，需标注为 oracle-budget ablation。
@@ -137,7 +137,7 @@ python main.py -algo FedSGD -data MNIST_100 -m FedAvgMLP -nc 100 -jr 1 -gr 500 -
 
 # AFA-style 余弦聚类基线
 python main.py -algo FedSGD -data MNIST_100 -m FedAvgMLP -nc 100 -jr 1 -gr 500 -lbs 100 \
-  -atk minsum -amr 0.20 -adev sign -def cosine_cluster -cciter 50 -cctol 1e-6 -amon
+  -atk minsum -amr 0.20 -adev sign -def cosine_cluster -ccselect high_mean -cciter 50 -cctol 1e-6 -amon
 
 # DnC；这里 dmar=amr 仅是受控 oracle-budget 消融
 python main.py -algo FedSGD -data MNIST_100 -m FedAvgMLP -nc 100 -jr 1 -gr 500 -lbs 100 \

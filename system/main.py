@@ -624,6 +624,9 @@ if __name__ == "__main__":
                         help="Maximum 1-D two-means iterations for cosine_cluster")
     parser.add_argument('-cctol', "--cosine_cluster_tolerance", type=float, default=1e-6,
                         help="Convergence/degeneracy tolerance for cosine_cluster")
+    parser.add_argument('-ccselect', "--cosine_cluster_selection_rule", type=str,
+                        choices=["high_mean", "largest_cluster"], default="high_mean",
+                        help="Cosine-cluster trusted group: high_mean cosine or largest_cluster")
 
 
     args = parser.parse_args()

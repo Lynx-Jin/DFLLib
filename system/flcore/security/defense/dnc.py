@@ -23,6 +23,7 @@ class DefenseResult:
     sampled_dimensions: List[int]
     aggregated_model: Optional[object] = None
     aggregation_mode: str = "selection"
+    selection_rule: str = ""
 
 
 class DnCDefense:

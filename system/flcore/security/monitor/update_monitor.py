@@ -60,7 +60,8 @@ class UpdateMonitor:
              "uploaded_count", "uploaded_malicious_count", "uploaded_benign_count",
              "accepted_count", "accepted_malicious_count", "accepted_benign_count",
              "blocked_count", "blocked_malicious_count", "blocked_benign_count",
-             "aggregation_mode", "score_by_client", "sampled_dimension_count"],
+             "aggregation_mode", "selection_rule", "score_by_client",
+             "sampled_dimension_count"],
         )
         self._write_header(
             self.global_csv,
@@ -159,12 +160,14 @@ class UpdateMonitor:
         defense = "none"
         sampled_dimension_count = 0
         aggregation_mode = "selection"
+        selection_rule = ""
         if defense_result is not None:
             defense = defense_result.defense
             scores = dict(zip(uploaded_ids, defense_result.scores))
             kept_positions = set(defense_result.kept_positions)
             sampled_dimension_count = len(defense_result.sampled_dimensions)
             aggregation_mode = getattr(defense_result, "aggregation_mode", "selection")
+            selection_rule = getattr(defense_result, "selection_rule", "")
 
         rows = [
             self._client_row(
@@ -223,6 +226,7 @@ class UpdateMonitor:
             "blocked_malicious_count": len(blocked_malicious_ids),
             "blocked_benign_count": len(blocked_ids) - len(blocked_malicious_ids),
             "aggregation_mode": aggregation_mode,
+            "selection_rule": selection_rule,
             "score_by_client": json.dumps({str(key): value for key, value in scores.items()}),
             "sampled_dimension_count": sampled_dimension_count,
         }

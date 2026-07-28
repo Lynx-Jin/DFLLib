@@ -1,515 +1,105 @@
 # DFLLib: Detection-oriented Federated Learning Library
 
-DFLLib is a research-oriented federated-learning framework for studying
-Byzantine model poisoning, robust aggregation, and update-level detection. It
-extends the training infrastructure of [PFLlib](https://github.com/TsingZ0/PFLlib)
-with an auditable attack/defense pipeline and will continue to grow as a
-reproducible benchmark for adaptive attacks and defenses.
+DFLLib 是一个面向**联邦学习模型投毒、鲁棒聚合与可审计检测**的 PyTorch 研究框架。项目以 [TsingZ0/PFLlib](https://github.com/TsingZ0/PFLlib) 的联邦学习训练基础设施为起点，重点扩展 Byzantine model poisoning 的攻击复现、服务端防御和逐轮实验审计能力。
 
-## Current security research scope
+它的目标不是把“准确率下降”当成唯一结论，而是让每一轮攻击和防御决策都可复查：哪些客户端被选中、哪些为实验设定的恶意客户端、实际上传了哪些更新、最终保留/屏蔽了谁，以及更新范数、余弦分数和任务指标如何变化。
 
-- **Model-poisoning attacks:** Min-Max, Min-Sum, Fang/Krum-tailored attack,
-  label flipping, and configurable malicious-client ratios and perturbation
-  directions.
-- **Robust aggregation and detection:** DnC spectral filtering, Krum,
-  Multi-Krum, Bulyan, coordinate-wise Trimmed Mean and Median, plus a
-  cosine-clustering baseline.
-- **Auditable experiments:** per-round records of scheduled, accepted and
-  blocked clients; client-update norms, cosine scores, defense decisions, and
-  global metrics.
-- **Federated optimization support:** FedAvg and one-minibatch FedSGD with
-  configurable server SGD/Adam, alongside CNN, MLP, VGG11, AlexNet and
-  small-input ResNet18 options.
+> 生成的数据集、模型检查点、实验 logger 和监控结果均被 `.gitignore` 排除；克隆后请在本地生成或放置数据集。
 
-See [the security module guide](system/flcore/security/README.md) for attack,
-defense, and command-line parameter descriptions. Generated datasets,
-checkpoints, and experiment logs are intentionally excluded from version
-control; regenerate datasets locally before running an experiment.
+## DFLLib 的主要贡献
 
-## Relationship to PFLlib
+- **攻击威胁模型分层。** 同时提供 AGR-agnostic 的 Min-Max / Min-Sum，以及知道良性更新和 Krum 配置的 oracle Fang-Krum；文档明确区分两者，避免把 oracle 结果误称为 agnostic 攻击。
+- **鲁棒聚合与检测基准。** 集成 Krum、Multi-Krum、Bulyan、坐标级 Trimmed Mean/Median、DnC 随机子空间 SVD，以及可切换簇选择准则的 AFA-style cosine clustering。
+- **可审计的攻防流水线。** 防御在服务端聚合前运行；`round_audit.csv`、`client_metrics.csv`、`group_summary.csv` 和监控总图记录攻击前上传、保留/屏蔽决策、L0/L2/L∞、与加权均值更新的余弦相似度、OA/SA/ASR 等指标。
+- **适用于更新级实验的训练路径。** 支持 FedAvg 和每个选中客户端仅上传一个 minibatch 梯度的 FedSGD；FedSGD 可配服务器 SGD/Adam。模型覆盖 FedAvgMLP、CNN、VGG11、AlexNet、针对小图像适配的 ResNet18。
+- **工程化实验控制。** 支持恶意客户端比例与固定随机 ID、攻击/防御预算分离、`-defstart` 防御 warm-up，以及 DnC 多次随机子空间筛选。
 
-DFLLib is built on and adapted from
-[TsingZ0/PFLlib](https://github.com/TsingZ0/PFLlib). Please cite and comply
-with the upstream project's Apache-2.0 license when using this repository.
-The upstream documentation is retained below for the original framework's
-algorithms, datasets, and general usage.
+## 目录导览
 
----
+| 路径 | 内容 |
+|---|---|
+| `system/main.py` | 实验入口、模型/算法/攻击/防御命令行参数。 |
+| `system/flcore/security/attack/` | Min-Max、Min-Sum、Fang-Krum 等攻击实现。 |
+| `system/flcore/security/defense/` | DnC、cosine cluster 和鲁棒 AGR 实现。 |
+| `system/flcore/security/monitor/` | 逐轮 CSV 审计与 dashboard 绘图。 |
+| `system/flcore/security/README.md` | 安全模块的实现细节、假设与完整命令说明。 |
+| `dataset/` | 数据划分/生成脚本；生成后的数据不纳入版本控制。 |
 
-## Upstream PFLlib documentation
+## 攻击方法与参数
 
-### <img src="docs/imgs/logo-green.png" alt="icon" height="24" style="vertical-align:sub;"/> PFLlib: Personalized Federated Learning Library and Benchmark
+所有攻击共用：`-atk`（默认 `none`）、`-amr` 恶意客户端占全体客户端比例（默认 `0.0`）、`-aseed` 固定恶意客户端 ID 的随机种子（默认 `0`）。`-amon` 开启审计；`-amondir`（默认 `attack_monitor`）、`-amonplot`（默认 `10`）和 `-amoneps`（默认 `0.0`）控制输出位置、绘图频率和 L0 阈值。
 
-🎯*We built a beginner-friendly federated learning (FL) library and benchmark: **master FL in 2 hours—run it on your PC!** [Contribute](#easy-to-extend) your algorithms, datasets, and metrics to grow the FL community.*
+| `-atk` 取值 | DFLLib 中的逻辑 | 方法专用参数（默认值与可选项） |
+|---|---|---|
+| `none` | 不修改客户端上传，作为 clean 对照。 | 无。建议显式写 `-atk none -amr 0`。 |
+| `label_flip` | 对数据集名以 `MNIST` 开头的恶意客户端训练标签执行固定 `7 → 1` 翻转；测试标签不变。 | 无额外参数；当前不提供 source/target 映射选项。 |
+| `free_rider` | 本地训练后用独立高斯噪声覆盖恶意客户端的整份上传模型。 | 无额外 CLI 参数；噪声标准差当前固定为 `0.5`，属于显式异常基线。 |
+| `minmax` | 使用**本轮活跃恶意客户端自身的干净更新**作代理，构造一份共享恶意更新；该更新到任一代理的最大平方 L2 距离受约束。所有活跃恶意客户端上传完全相同的更新。 | `-adev {unit_vec,sign,std}`（`std`）；`-alinit 10.0`；`-atol 1e-5`；`-amaxsteps 80`。 |
+| `minsum` | 与 Min-Max 相同的 agnostic 信息集和共享恶意更新，但约束是到全部代理的平方 L2 距离和。 | 同 Min-Max：`-adev {unit_vec,sign,std}`、`-alinit`、`-atol`、`-amaxsteps`。 |
+| `fang` | Fang-style、面向 Krum 的 oracle 攻击：读取当轮良性上传，用反符号方向搜索仍会被 Krum 选中的共享恶意更新。 | `-fmar 0.20` 为攻击者已知的 Krum Byzantine 预算；另有 `-alinit 10.0`、`-atol 1e-5`、`-amaxsteps 80`。仅应与 `-def krum` 一起解释。 |
 
-👏 The **[official website](http://www.pfllib.com)** and **[leaderboard](http://www.pfllib.com/benchmark.html)** is live! Our methods—[FedCP](https://github.com/TsingZ0/FedCP), [GPFL](https://github.com/TsingZ0/GPFL), and [FedDBE](https://github.com/TsingZ0/DBE)—lead the way. Notably, **FedDBE** stands out with robust performance across varying data heterogeneity levels.
+`-adev` 的含义：`unit_vec` 为代理均值的单位方向；`sign` 为代理均值的逐坐标符号；`std` 为代理更新的逐坐标标准差。它们是攻击偏移方向，而不是防御阈值。Min-Max/Min-Sum 不读取良性客户端更新，也不读取服务器所选 AGR；`fang` 恰好相反，属于已知防御的受控攻击。
 
-[![JMLR](https://img.shields.io/badge/JMLR-Published-blue)](https://www.jmlr.org/papers/v26/23-1634.html)
-[![arXiv](https://img.shields.io/badge/arXiv-2312.04992-b31b1b.svg)](https://arxiv.org/abs/2312.04992)
-![Apache License 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
+## 防御方法与参数
 
+所有防御共用 `-def`（默认 `none`）和 `-defstart`（默认 `0`）。只有通信轮 `round >= defstart` 才会实际防御；此前仍照常记录审计数据。`-rmar`（默认 `0.20`）是 Krum、Multi-Krum、Bulyan、Trimmed Mean、Median 的**公开假定 Byzantine 比例**，不等于攻击真值 `-amr`。
 
-![](docs/imgs/structure.png)
-Figure 1: An Example for FedAvg. You can create a scenario using `generate_DATA.py` and run an algorithm using `main.py`, `clientNAME.py`, and `serverNAME.py`. For a new algorithm, you only need to add new features in `clientNAME.py` and `serverNAME.py`.
+| `-def` 取值 | DFLLib 中的逻辑 | 参数、可选项与约束 |
+|---|---|---|
+| `none` | 样本数加权 FedAvg；FedSGD 则由服务器优化器更新平均梯度。 | 无。 |
+| `krum` | 按最近 `n-f-2` 个邻居的平方距离和评分，仅聚合评分最低的一个更新。 | `-rmar 0.20`；要求本轮上传数 `n ≥ 2f+3`。 |
+| `multikrum` | 以 Krum 分数选多个更新后平均。 | `-rmar 0.20`；`-mks 0` 表示自动取最大合法数量 `n-2f-3`，也可指定正整数；要求 `n ≥ 2f+3`。 |
+| `bulyan` | 先以 Multi-Krum 选候选，再逐坐标保留接近候选中位数的值并平均。 | `-rmar 0.20`；要求 `n ≥ 4f+3`，因此 `n=100, f=25` 不合法。 |
+| `trimmedmean` | 每个参数坐标独立排序，去掉两端各 `f` 个值后平均。 | `-rmar 0.20`；要求 `n > 2f`。这是坐标级而非客户端整体屏蔽。 |
+| `median` | 每个参数坐标独立取中位数。 | `-rmar 0.20` 用于统一记录防御预算；同样是坐标级聚合。 |
+| `cosine_cluster` | 计算 `cos(u_i, Σ_j w_j u_j)`；对一维余弦分数做确定性二均值聚类，再保留一个簇。它是 AFA-style 基线，**不是** AFA 的完整复现。 | `-ccselect {high_mean,largest_cluster}`（默认 `high_mean`）；`-cciter 50`；`-cctol 1e-6`。 |
+| `dnc` | 对随机抽取的参数坐标子空间中心化并做 SVD；按首右奇异向量投影平方排除高分更新。多次子空间运行时保留集取交集。 | `-dmar 0.20`、`-df 1.0`、`-di 1`、`-db 10000`、`-dseed 0`。 |
 
-🎯**If you find our repository useful, please cite the corresponding paper:**
+### Cosine-cluster 的保留规则
 
-```
-@article{zhang2025pfllib,
-  title={PFLlib: A Beginner-Friendly and Comprehensive Personalized Federated Learning Library and Benchmark},
-  author={Zhang, Jianqing and Liu, Yang and Hua, Yang and Wang, Hao and Song, Tao and Xue, Zhengui and Ma, Ruhui and Cao, Jian},
-  journal={Journal of Machine Learning Research},
-  volume={26},
-  number={50},
-  pages={1--10},
-  year={2025}
-}
+`-ccselect` 控制二均值分簇后哪一簇被视为良性簇：
 
-@inproceedings{Zhang2025htfllib,
-  author={Zhang, Jianqing and Wu, Xinghao and Zhou, Yanbing and Sun, Xiaoting and Cai, Qiqi and Liu, Yang and Hua, Yang and Zheng, Zhenzhe and Cao, Jian and Yang, Qiang},
-  title = {HtFLlib: A Comprehensive Heterogeneous Federated Learning Library and Benchmark},
-  year = {2025},
-  booktitle = {Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining}
-}
-```
-### Key Features
+- `high_mean`（默认，保持旧行为）：保留**平均余弦相似度更高**的簇。
+- `largest_cluster`：保留**客户端数量更多**的簇；若两簇大小相同，则以平均余弦相似度更高者打破平局。
 
-- **39 traditional FL ([tFL](#traditional-fl-tfl)) and personalized FL ([pFL](#personalized-fl-pfl)) algorithms, 3 scenarios, and 24 datasets.**
+两种规则使用相同的余弦分数和相同的二均值划分，区别只在最后的簇选择假设。前者假定良性更新更接近全体加权均值，后者假定良性客户端是多数；在攻击者占比接近一半、非 IID 导致良性更新多模态，或攻击者集体主导均值时，这些假设都可能失效，应以审计中的恶意接受率与良性误屏蔽率报告结果。
 
-- Real-machine deployment: [HtFL-OnDevice](https://github.com/TsingZ0//HtFL-OnDevice).
+## 常用实验命令
 
-- Some **experimental results** are avalible in its [paper](https://arxiv.org/abs/2312.04992) and [here](#experimental-results). 
-
-- Refer to [examples](#how-to-start-simulating-examples-for-fedavg) to learn how to use it.
-
-- Refer to [easy to extend](#easy-to-extend) to learn how to add new data or algorithms.
-
-- The benchmark platform can simulate scenarios using the 4-layer CNN on Cifar100 for **500 clients** on **one NVIDIA GeForce RTX 3090 GPU card** with only **5.08GB GPU memory** cost.
-
-- We provide [privacy evaluation](#privacy-evaluation) and [systematical research supprot](#systematical-research-supprot). 
-
-- You can now train on some clients and evaluate performance on new clients by setting `args.num_new_clients` in `./system/main.py`. Please note that not all tFL/pFL algorithms support this feature.
-
-- PFLlib primarily focuses on data (statistical) heterogeneity. For algorithms and a benchmark platform that address **both data and model heterogeneity**, please refer to our extended project **[Heterogeneous Federated Learning (HtFLlib)](https://github.com/TsingZ0/HtFLlib)**.
-
-- As we strive to meet diverse user demands, frequent updates to the project may alter default settings and scenario creation codes, affecting experimental results.
-  
-- [Closed issues](https://github.com/TsingZ0/PFLlib/issues?q=is%3Aissue+is%3Aclosed) may help you a lot when errors arise.
-
-- When submitting pull requests, please provide sufficient *instructions* and *examples* in the comment box. 
-
-The origin of the **data heterogeneity** phenomenon is the characteristics of users, who generate non-IID (not Independent and Identically Distributed) and unbalanced data. With data heterogeneity existing in the FL scenario, a myriad of approaches have been proposed to crack this hard nut. In contrast, the personalized FL (pFL) may take advantage of the statistically heterogeneous data to learn the personalized model for each user. 
-
-
-## Algorithms with code (updating)
-
-> ### Traditional FL (tFL)
-
-  ***Basic tFL***
-
-- **FedAvg** — [Communication-Efficient Learning of Deep Networks from Decentralized Data](http://proceedings.mlr.press/v54/mcmahan17a.html) *AISTATS 2017*
-
-  ***Update-correction-based tFL***
-
-- **SCAFFOLD** - [SCAFFOLD: Stochastic Controlled Averaging for Federated Learning](http://proceedings.mlr.press/v119/karimireddy20a.html) *ICML 2020*
-
-  ***Regularization-based tFL***
-
-- **FedProx** — [Federated Optimization in Heterogeneous Networks](https://arxiv.org/abs/1812.06127) *MLsys 2020*
-- **FedDyn** — [Federated Learning Based on Dynamic Regularization](https://openreview.net/forum?id=B7v4QMR6Z9w) *ICLR 2021*
-
-  ***Model-splitting-based tFL***
-
-- **MOON** — [Model-Contrastive Federated Learning](https://openaccess.thecvf.com/content/CVPR2021/html/Li_Model-Contrastive_Federated_Learning_CVPR_2021_paper.html) *CVPR 2021*
-- **FedLC** — [Federated Learning With Label Distribution Skew via Logits Calibration](https://proceedings.mlr.press/v162/zhang22p.html) *ICML 2022*
-
-  ***Knowledge-distillation-based tFL***
-
-- **FedGen** — [Data-Free Knowledge Distillation for Heterogeneous Federated Learning](http://proceedings.mlr.press/v139/zhu21b.html) *ICML 2021*
-- **FedNTD** — [Preservation of the Global Knowledge by Not-True Distillation in Federated Learning](https://proceedings.neurips.cc/paper_files/paper/2022/hash/fadec8f2e65f181d777507d1df69b92f-Abstract-Conference.html) *NeurIPS 2022*
-
-  ***Heuristically-search-based tFL***
-  
-- **FedCross** - [FedCross: Towards Accurate Federated Learning via Multi-Model Cross-Aggregation](https://www.computer.org/csdl/proceedings-article/icde/2024/171500c137/1YOuaPcHF3q) *ICDE 2024*
-
-> ### Personalized FL (pFL)
-
-  ***Meta-learning-based pFL***
-
-- **Per-FedAvg** — [Personalized Federated Learning with Theoretical Guarantees: A Model-Agnostic Meta-Learning Approach](https://proceedings.neurips.cc/paper/2020/hash/24389bfe4fe2eba8bf9aa9203a44cdad-Abstract.html) *NeurIPS 2020*
-
-  ***Regularization-based pFL***
-  
-- **pFedMe** — [Personalized Federated Learning with Moreau Envelopes](https://papers.nips.cc/paper/2020/hash/f4f1f13c8289ac1b1ee0ff176b56fc60-Abstract.html) *NeurIPS 2020*
-- **Ditto** — [Ditto: Fair and robust federated learning through personalization](https://proceedings.mlr.press/v139/li21h.html) *ICML 2021*
-
-  ***Personalized-aggregation-based pFL***
-
-- **APFL** — [Adaptive Personalized Federated Learning](https://arxiv.org/abs/2003.13461) *2020* 
-- **FedFomo** — [Personalized Federated Learning with First Order Model Optimization](https://openreview.net/forum?id=ehJqJQk9cw) *ICLR 2021*
-- **FedAMP** — [Personalized Cross-Silo Federated Learning on non-IID Data](https://ojs.aaai.org/index.php/AAAI/article/view/16960) *AAAI 2021*
-- **FedPHP** — [FedPHP: Federated Personalization with Inherited Private Models](https://link.springer.com/chapter/10.1007/978-3-030-86486-6_36) *ECML PKDD 2021*
-- **APPLE** — [Adapt to Adaptation: Learning Personalization for Cross-Silo Federated Learning](https://www.ijcai.org/proceedings/2022/301) *IJCAI 2022*
-- **FedALA** — [FedALA: Adaptive Local Aggregation for Personalized Federated Learning](https://ojs.aaai.org/index.php/AAAI/article/view/26330) *AAAI 2023* 
-
-  ***Model-splitting-based pFL***
-
-- **FedPer** — [Federated Learning with Personalization Layers](https://arxiv.org/abs/1912.00818) *2019*
-- **LG-FedAvg** — [Think Locally, Act Globally: Federated Learning with Local and Global Representations](https://arxiv.org/abs/2001.01523) *2020*
-- **FedRep** — [Exploiting Shared Representations for Personalized Federated Learning](http://proceedings.mlr.press/v139/collins21a.html) *ICML 2021*
-- **FedRoD** — [On Bridging Generic and Personalized Federated Learning for Image Classification](https://openreview.net/forum?id=I1hQbx10Kxn) *ICLR 2022*
-- **FedBABU** — [Fedbabu: Towards enhanced representation for federated image classification](https://openreview.net/forum?id=HuaYQfggn5u) *ICLR 2022*
-- **FedGC** — [Federated Learning for Face Recognition with Gradient Correction](https://ojs.aaai.org/index.php/AAAI/article/view/20095/19854) *AAAI 2022*
-- **FedCP** — [FedCP: Separating Feature Information for Personalized Federated Learning via Conditional Policy](https://arxiv.org/pdf/2307.01217v2.pdf) *KDD 2023*
-- **GPFL** — [GPFL: Simultaneously Learning Generic and Personalized Feature Information for Personalized Federated Learning](https://arxiv.org/pdf/2308.10279v3.pdf) *ICCV 2023*
-- **FedGH** — [FedGH: Heterogeneous Federated Learning with Generalized Global Header](https://dl.acm.org/doi/10.1145/3581783.3611781) *ACM MM 2023*
-- **FedDBE** — [Eliminating Domain Bias for Federated Learning in Representation Space](https://openreview.net/forum?id=nO5i1XdUS0) *NeurIPS 2023*
-- **FedCAC** — [Bold but Cautious: Unlocking the Potential of Personalized Federated Learning through Cautiously Aggressive Collaboration](https://arxiv.org/abs/2309.11103) *ICCV 2023*
-- **PFL-DA** — [Personalized Federated Learning via Domain Adaptation with an Application to Distributed 3D Printing](https://www.tandfonline.com/doi/full/10.1080/00401706.2022.2157882) *Technometrics 2023*
-- **FedAS** — [FedAS: Bridging Inconsistency in Personalized Federated Learning](https://openaccess.thecvf.com/content/CVPR2024/papers/Yang_FedAS_Bridging_Inconsistency_in_Personalized_Federated_Learning_CVPR_2024_paper.pdf) *CVPR 2024*
-
-  ***Knowledge-distillation-based pFL (more in [HtFLlib](https://github.com/TsingZ0/HtFLlib))***
-
-- **FD (FedDistill)** — [Communication-Efficient On-Device Machine Learning: Federated Distillation and Augmentation under Non-IID Private Data](https://arxiv.org/pdf/1811.11479.pdf) *2018*
-- **FML** — [Federated Mutual Learning](https://arxiv.org/abs/2006.16765) *2020*
-- **FedKD** — [Communication-efficient federated learning via knowledge distillation](https://www.nature.com/articles/s41467-022-29763-x) *Nature Communications 2022*
-- **FedProto** — [FedProto: Federated Prototype Learning across Heterogeneous Clients](https://ojs.aaai.org/index.php/AAAI/article/view/20819) *AAAI 2022*
-- **FedPCL (w/o pre-trained models)** — [Federated learning from pre-trained models: A contrastive learning approach](https://proceedings.neurips.cc/paper_files/paper/2022/file/7aa320d2b4b8f6400b18f6f77b6c1535-Paper-Conference.pdf) *NeurIPS 2022* 
-- **FedPAC** — [Personalized Federated Learning with Feature Alignment and Classifier Collaboration](https://openreview.net/pdf?id=SXZr8aDKia) *ICLR 2023*
-
-  ***Other pFL***
-
-- **FedMTL (not MOCHA)** — [Federated multi-task learning](https://papers.nips.cc/paper/2017/hash/6211080fa89981f66b1a0c9d55c61d0f-Abstract.html) *NeurIPS 2017*
-- **FedBN** — [FedBN: Federated Learning on non-IID Features via Local Batch Normalization](https://openreview.net/forum?id=6YEQUn0QICG) *ICLR 2021*
-
-## Datasets and scenarios (updating)
-
-We support 3 types of scenarios with various datasets and move the common dataset splitting code into `./dataset/utils` for easy extension. If you need another data set, just write another code to download it and then use the [utils](https://github.com/TsingZ0/PFLlib/tree/master/dataset/utils).
-
-### ***label skew*** scenario
-
-For the ***label skew*** scenario, we introduce **16** famous datasets: 
-
-- **MNIST**
-- **EMNIST**
-- **FEMNIST**
-- **Fashion-MNIST**
-- **Cifar10**
-- **Cifar100**
-- **AG News**
-- **Sogou News**
-- **Tiny-ImageNet**
-- **Country211**
-- **Flowers102**
-- **GTSRB**
-- **Shakespeare**
-- **Stanford Cars**
-- **COVIDx**
-- **kvasir**
-
-The datasets can be easily split into **IID** and **non-IID** versions. In the **non-IID** scenario, we distinguish between two types of distribution:
-
-1. **Pathological non-IID**: In this case, each client only holds a subset of the labels, for example, just 2 out of 10 labels from the MNIST dataset, even though the overall dataset contains all 10 labels. This leads to a highly skewed distribution of data across clients.
-
-2. **Practical non-IID**: Here, we model the data distribution using a Dirichlet distribution, which results in a more realistic and less extreme imbalance. For more details on this, refer to this [paper](https://proceedings.neurips.cc/paper/2020/hash/18df51b97ccd68128e994804f3eccc87-Abstract.html).
-
-Additionally, we offer a `balance` option, where data amount is evenly distributed across all clients.
-
-### ***feature shift*** scenario
-
-For the ***feature shift*** scenario, we utilize **3** widely used datasets in Domain Adaptation: 
-- **Amazon Review** (raw data can be fetched from [this link](https://drive.google.com/file/d/1QbXFENNyqor1IlCpRRFtOluI2_hMEd1W/view?usp=sharing))
-- **Digit5** (raw data available [here](https://drive.google.com/file/d/1sO2PisChNPVT0CnOvIgGJkxdEosCwMUb/view))
-- **DomainNet**
-
-### ***real-world*** scenario
-
-For the ***real-world*** scenario, we introduce **5** naturally separated datasets:  
-- **Camelyon17** (5 hospitals, 2 labels)  
-- **iWildCam** (194 camera traps, 158 labels)  
-- **Omniglot** (20 clients, 50 labels)  
-- **HAR (Human Activity Recognition)** (30 clients, 6 labels)  
-- **PAMAP2** (9 clients, 12 labels)  
-
-For more details on datasets and FL algorithms in **IoT**, please refer to [FL-IoT](https://github.com/TsingZ0/FL-IoT).
-
-### Examples for **MNIST** in the ***label skew*** scenario
-```bash
-cd ./dataset
-# Please modify train_ratio and alpha in dataset\utils\dataset_utils.py
-
-python generate_MNIST.py iid - - # for iid and unbalanced scenario
-python generate_MNIST.py iid balance - # for iid and balanced scenario
-python generate_MNIST.py noniid - pat # for pathological noniid and unbalanced scenario
-python generate_MNIST.py noniid - dir # for practical noniid and unbalanced scenario
-python generate_MNIST.py noniid - exdir # for Extended Dirichlet strategy 
-```
-
-The command line output of running `python generate_MNIST.py noniid - dir`
-```bash
-Number of classes: 10
-Client 0         Size of data: 2630      Labels:  [0 1 4 5 7 8 9]
-                 Samples of labels:  [(0, 140), (1, 890), (4, 1), (5, 319), (7, 29), (8, 1067), (9, 184)]
---------------------------------------------------
-Client 1         Size of data: 499       Labels:  [0 2 5 6 8 9]
-                 Samples of labels:  [(0, 5), (2, 27), (5, 19), (6, 335), (8, 6), (9, 107)]
---------------------------------------------------
-Client 2         Size of data: 1630      Labels:  [0 3 6 9]
-                 Samples of labels:  [(0, 3), (3, 143), (6, 1461), (9, 23)]
---------------------------------------------------
-```
-<details>
-    <summary>Show more</summary>
-
-    Client 3         Size of data: 2541      Labels:  [0 4 7 8]
-                     Samples of labels:  [(0, 155), (4, 1), (7, 2381), (8, 4)]
-    --------------------------------------------------
-    Client 4         Size of data: 1917      Labels:  [0 1 3 5 6 8 9]
-                     Samples of labels:  [(0, 71), (1, 13), (3, 207), (5, 1129), (6, 6), (8, 40), (9, 451)]
-    --------------------------------------------------
-    Client 5         Size of data: 6189      Labels:  [1 3 4 8 9]
-                     Samples of labels:  [(1, 38), (3, 1), (4, 39), (8, 25), (9, 6086)]
-    --------------------------------------------------
-    Client 6         Size of data: 1256      Labels:  [1 2 3 6 8 9]
-                     Samples of labels:  [(1, 873), (2, 176), (3, 46), (6, 42), (8, 13), (9, 106)]
-    --------------------------------------------------
-    Client 7         Size of data: 1269      Labels:  [1 2 3 5 7 8]
-                     Samples of labels:  [(1, 21), (2, 5), (3, 11), (5, 787), (7, 4), (8, 441)]
-    --------------------------------------------------
-    Client 8         Size of data: 3600      Labels:  [0 1]
-                     Samples of labels:  [(0, 1), (1, 3599)]
-    --------------------------------------------------
-    Client 9         Size of data: 4006      Labels:  [0 1 2 4 6]
-                     Samples of labels:  [(0, 633), (1, 1997), (2, 89), (4, 519), (6, 768)]
-    --------------------------------------------------
-    Client 10        Size of data: 3116      Labels:  [0 1 2 3 4 5]
-                     Samples of labels:  [(0, 920), (1, 2), (2, 1450), (3, 513), (4, 134), (5, 97)]
-    --------------------------------------------------
-    Client 11        Size of data: 3772      Labels:  [2 3 5]
-                     Samples of labels:  [(2, 159), (3, 3055), (5, 558)]
-    --------------------------------------------------
-    Client 12        Size of data: 3613      Labels:  [0 1 2 5]
-                     Samples of labels:  [(0, 8), (1, 180), (2, 3277), (5, 148)]
-    --------------------------------------------------
-    Client 13        Size of data: 2134      Labels:  [1 2 4 5 7]
-                     Samples of labels:  [(1, 237), (2, 343), (4, 6), (5, 453), (7, 1095)]
-    --------------------------------------------------
-    Client 14        Size of data: 5730      Labels:  [5 7]
-                     Samples of labels:  [(5, 2719), (7, 3011)]
-    --------------------------------------------------
-    Client 15        Size of data: 5448      Labels:  [0 3 5 6 7 8]
-                     Samples of labels:  [(0, 31), (3, 1785), (5, 16), (6, 4), (7, 756), (8, 2856)]
-    --------------------------------------------------
-    Client 16        Size of data: 3628      Labels:  [0]
-                     Samples of labels:  [(0, 3628)]
-    --------------------------------------------------
-    Client 17        Size of data: 5653      Labels:  [1 2 3 4 5 7 8]
-                     Samples of labels:  [(1, 26), (2, 1463), (3, 1379), (4, 335), (5, 60), (7, 17), (8, 2373)]
-    --------------------------------------------------
-    Client 18        Size of data: 5266      Labels:  [0 5 6]
-                     Samples of labels:  [(0, 998), (5, 8), (6, 4260)]
-    --------------------------------------------------
-    Client 19        Size of data: 6103      Labels:  [0 1 2 3 4 9]
-                     Samples of labels:  [(0, 310), (1, 1), (2, 1), (3, 1), (4, 5789), (9, 1)]
-    --------------------------------------------------
-    Total number of samples: 70000
-    The number of train samples: [1972, 374, 1222, 1905, 1437, 4641, 942, 951, 2700, 3004, 2337, 2829, 2709, 1600, 4297, 4086, 2721, 4239, 3949, 4577]
-    The number of test samples: [658, 125, 408, 636, 480, 1548, 314, 318, 900, 1002, 779, 943, 904, 534, 1433, 1362, 907, 1414, 1317, 1526]
-
-    Saving to disk.
-
-    Finish generating dataset.
-</details>
-
-## Models
-- for MNIST and Fashion-MNIST
-
-    1. Mclr_Logistic(1\*28\*28) # convex
-    2. LeNet()
-    3. DNN(1\*28\*28, 100)
-
-- for Cifar10, Cifar100 and Tiny-ImageNet
-
-    1. Mclr_Logistic(3\*32\*32) # convex
-    2. FedAvgCNN()
-    3. DNN(3\*32\*32, 100)
-    4. ResNet18, AlexNet, MobileNet, GoogleNet, etc.
-
-- for AG_News and Sogou_News
-
-    - LSTM()
-    - fastText() in [Bag of Tricks for Efficient Text Classification](https://aclanthology.org/E17-2068/) 
-    - TextCNN() in [Convolutional Neural Networks for Sentence Classification](https://aclanthology.org/D14-1181/)
-    - TransformerModel() in [Attention is all you need](https://proceedings.neurips.cc/paper/2017/hash/3f5ee243547dee91fbd053c1c4a845aa-Abstract.html)
-
-- for AmazonReview
-
-    - AmazonMLP() in [Curriculum manager for source selection in multi-source domain adaptation](https://link.springer.com/chapter/10.1007/978-3-030-58568-6_36)
-
-- for Omniglot
-
-    - FedAvgCNN()
-
-- for HAR and PAMAP
-
-    - HARCNN() in [Convolutional neural networks for human activity recognition using mobile sensors](https://eudl.eu/pdf/10.4108/icst.mobicase.2014.257786)
-
-## Environments
-Install [CUDA](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html). 
-
-Install [conda latest](https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh) and activate conda. 
-
-For additional configurations, refer to the `prepare.sh` script.  
+以下命令从 `system/` 目录执行；其中参数仅展示接口用法，不构成通用最优超参。
 
 ```bash
-conda env create -f env_cuda_latest.yaml  # Downgrade torch via pip if needed to match the CUDA version
+# Clean FedSGD 对照
+python main.py -algo FedSGD -fopt adam -flr 0.001 -data MNIST_100 -m FedAvgMLP \
+  -nc 100 -jr 1 -gr 500 -lbs 100 -atk none -amr 0 -amon
+
+# AGR-agnostic Min-Max + cosine 分簇：按余弦均值高的簇保留
+python main.py -algo FedSGD -fopt adam -flr 0.001 -data MNIST_100 -m FedAvgMLP \
+  -nc 100 -jr 1 -gr 500 -lbs 100 -atk minmax -amr 0.20 -adev sign \
+  -def cosine_cluster -ccselect high_mean -cciter 50 -cctol 1e-6 -amon
+
+# 同一分簇，但按簇大小保留；第 50 轮才开始防御
+python main.py -algo FedSGD -fopt adam -flr 0.001 -data MNIST_100 -m FedAvgMLP \
+  -nc 100 -jr 1 -gr 500 -lbs 100 -atk minsum -amr 0.20 -adev sign \
+  -def cosine_cluster -ccselect largest_cluster -defstart 50 -amon
+
+# DnC：dmar=amr 是受控 oracle-budget 消融，不是部署设定
+python main.py -algo FedSGD -fopt adam -flr 0.001 -data MNIST_100 -m FedAvgMLP \
+  -nc 100 -jr 1 -gr 500 -lbs 100 -atk minmax -amr 0.20 -adev sign \
+  -def dnc -dmar 0.20 -df 1.0 -di 1 -db 10000 -dseed 0 -amon
 ```
 
-## How to start simulating (examples for FedAvg)
+## 结果与审计解释
 
-- Download [this project](https://github.com/TsingZ0/PFLlib) to an appropriate location using [git](https://git-scm.com/).
-    ```bash
-    git clone https://github.com/TsingZ0/PFLlib.git
-    ```
+当启用 `-amon`（任何防御也会自动开启审计）时，输出目录含：
 
-- Create proper environments (see [Environments](#environments)).
+- `round_audit.csv`：每轮选中、上传、接受和屏蔽的客户端 ID，以及恶意/良性计数。
+- `client_metrics.csv`：每份防御前上传的 L0、L2、L∞、相对当前样本加权均值更新的余弦相似度，及最终防御决定。
+- `group_summary.csv`：按 benign/malicious（仅离线审计真值）分组的均值与标准差。
+- `global_metrics.csv` 与 `monitor_dashboard.png`：OA、SA、ASR（仅 label-flip 目标攻击可解释）和检测统计的时间序列。
 
-- Build evaluation scenarios (see [Datasets and scenarios (updating)](#datasets-and-scenarios-updating)).
+对 Min-Max、Min-Sum 等 untargeted 更新攻击，不应将零 ASR 解读为防御成功；应报告 clean/attack accuracy、恶意接受率、恶意屏蔽率、良性误屏蔽率以及每轮实际上报人数。`-amr`、`-rmar`、`-dmar` 是不同角色的参数；将它们设成相同数值时，应在论文或报告中标明这是 oracle-budget ablation。
 
-- Run evaluation: 
-    ```bash
-    cd ./system
-    python main.py -data MNIST -m CNN -algo FedAvg -gr 2000 -did 0 # using the MNIST dataset, the FedAvg algorithm, and the 4-layer CNN model
-    python main.py -data MNIST -m CNN -algo FedAvg -gr 2000 -did 0,1,2,3 # running on multiple GPUs
-    ```
+## 致谢与许可证
 
-**Note**: It is preferable to tune algorithm-specific hyper-parameters before using any algorithm on a new machine. 
-
-## Easy to extend
-
-This library is designed to be easily extendable with new algorithms and datasets. Here’s how you can add them:
-
-- **New Dataset**: To add a new dataset, simply create a `generate_DATA.py` file in `./dataset` and then write the download code and use the [utils](https://github.com/TsingZ0/PFLlib/tree/master/dataset/utils) as shown in `./dataset/generate_MNIST.py` (you can consider it as a template):
-  ```python
-  # `generate_DATA.py`
-  import necessary pkgs
-  from utils import necessary processing funcs
-
-  def generate_dataset(...):
-    # download dataset as usual
-    # pre-process dataset as usual
-    X, y, statistic = separate_data((dataset_content, dataset_label), ...)
-    train_data, test_data = split_data(X, y)
-    save_file(config_path, train_path, test_path, train_data, test_data, statistic, ...)
-
-  # call the generate_dataset func
-  ```
-  
-- **New Algorithm**: To add a new algorithm, extend the base classes **Server** and **Client**, which are defined in `./system/flcore/servers/serverbase.py` and `./system/flcore/clients/clientbase.py`, respectively.
-  - Server
-    ```python
-    # serverNAME.py
-    import necessary pkgs
-    from flcore.clients.clientNAME import clientNAME
-    from flcore.servers.serverbase import Server
-
-    class NAME(Server):
-        def __init__(self, args, times):
-            super().__init__(args, times)
-
-            # select slow clients
-            self.set_slow_clients()
-            self.set_clients(clientAVG)
-        def train(self):
-            # server scheduling code of your algorithm
-    ```
-  - Client
-    ```python
-    # clientNAME.py
-    import necessary pkgs
-    from flcore.clients.clientbase import Client
-
-    class clientNAME(Client):
-        def __init__(self, args, id, train_samples, test_samples, **kwargs):
-            super().__init__(args, id, train_samples, test_samples, **kwargs)
-            # add specific initialization
-        
-        def train(self):
-            # client training code of your algorithm
-    ```
-  
-- **New Model**: To add a new model, simply include it in `./system/flcore/trainmodel/models.py`.
-  
-- **New Optimizer**: If you need a new optimizer for training, add it to `./system/flcore/optimizers/fedoptimizer.py`.
-  
-- **New Benchmark Platform or Library**: Our framework is flexible, allowing users to build custom platforms or libraries for specific applications, such as [FL-IoT](https://github.com/TsingZ0/FL-IoT) and [HtFLlib](https://github.com/TsingZ0/HtFLlib).
-
-
-## Privacy Evaluation
-
-You can use the following privacy evaluation methods to assess the privacy-preserving capabilities of tFL/pFL algorithms in PFLlib. Please refer to `./system/flcore/servers/serveravg.py` for an example. Note that most of these evaluations are not typically considered in the original papers. _We encourage you to add more attacks and metrics for privacy evaluation._ 
-
-### Currently supported attacks:
-- [DLG (Deep Leakage from Gradients)](https://www.ijcai.org/proceedings/2022/0324.pdf) attack
-
-### Currently supported metrics:
-- **PSNR (Peak Signal-to-Noise Ratio)**: an objective metric for image evaluation, defined as the logarithm of the ratio of the squared maximum value of RGB image fluctuations to the Mean Squared Error (MSE) between two images. A lower PSNR score indicates better privacy-preserving capabilities.
-
-
-## Systematical research supprot
-
-To simulate Federated Learning (FL) under practical conditions, such as **client dropout**, **slow trainers**, **slow senders**, and **network TTL (Time-To-Live)**, you can adjust the following parameters:
-
-- `-cdr`: Dropout rate for clients. Clients are randomly dropped at each training round based on this rate.
-- `-tsr` and `-ssr`: Slow trainer and slow sender rates, respectively. These parameters define the proportion of clients that will behave as slow trainers or slow senders. Once a client is selected as a "slow trainer" or "slow sender," it will consistently train/send slower than other clients.
-- `-tth`: Threshold for network TTL in milliseconds.
-
-Thanks to [@Stonesjtu](https://github.com/Stonesjtu/pytorch_memlab/blob/d590c489236ee25d157ff60ecd18433e8f9acbe3/pytorch_memlab/mem_reporter.py#L185), this library can also record the **GPU memory usage** for the model. 
-
-## Experimental Results
-
-If you're interested in **experimental results (e.g., accuracy)** for the algorithms mentioned above, you can find results in our accepted FL papers, which also utilize this library. These papers include:
-
-- [FedALA](https://github.com/TsingZ0/FedALA)
-- [FedCP](https://github.com/TsingZ0/FedCP)
-- [GPFL](https://github.com/TsingZ0/GPFL)
-- [DBE](https://github.com/TsingZ0/DBE)
-
-Please note that while these results were based on this library, **reproducing the exact results may be challenging** as some settings might have changed in response to community feedback. For example, in earlier versions, we set `shuffle=False` in `clientbase.py`.
-
-Here are the relevant papers for your reference:
-
-```
-@inproceedings{zhang2023fedala,
-  title={Fedala: Adaptive local aggregation for personalized federated learning},
-  author={Zhang, Jianqing and Hua, Yang and Wang, Hao and Song, Tao and Xue, Zhengui and Ma, Ruhui and Guan, Haibing},
-  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-  volume={37},
-  number={9},
-  pages={11237--11244},
-  year={2023}
-}
-
-@inproceedings{Zhang2023fedcp,
-  author = {Zhang, Jianqing and Hua, Yang and Wang, Hao and Song, Tao and Xue, Zhengui and Ma, Ruhui and Guan, Haibing},
-  title = {FedCP: Separating Feature Information for Personalized Federated Learning via Conditional Policy},
-  year = {2023},
-  booktitle = {Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining}
-}
-
-@inproceedings{zhang2023gpfl,
-  title={GPFL: Simultaneously Learning Global and Personalized Feature Information for Personalized Federated Learning},
-  author={Zhang, Jianqing and Hua, Yang and Wang, Hao and Song, Tao and Xue, Zhengui and Ma, Ruhui and Cao, Jian and Guan, Haibing},
-  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
-  pages={5041--5051},
-  year={2023}
-}
-
-@inproceedings{zhang2023eliminating,
-  title={Eliminating Domain Bias for Federated Learning in Representation Space},
-  author={Jianqing Zhang and Yang Hua and Jian Cao and Hao Wang and Tao Song and Zhengui XUE and Ruhui Ma and Haibing Guan},
-  booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-  year={2023},
-  url={https://openreview.net/forum?id=nO5i1XdUS0}
-}
-```
+DFLLib 建立在 [PFLlib](https://github.com/TsingZ0/PFLlib) 的训练框架与部分数据/算法基础设施之上；请在使用或发布基于本项目的结果时同时遵守上游项目的 Apache-2.0 许可证并适当致谢。DFLLib 的安全模块实现与实验审计扩展以本仓库为准。

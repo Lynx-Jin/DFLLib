@@ -4,7 +4,8 @@ This is deliberately exposed as ``cosine_cluster`` rather than as an exact
 implementation of any AFA variant.  It first computes the sample-weighted mean
 of all pre-defense client updates, scores each update by its cosine with that
 mean, then performs deterministic 1-D two-means clustering on those scores.
-Only the cluster with the higher mean cosine is aggregated.
+The retained cluster is selected either by higher mean cosine or by larger
+client count; the choice is an explicit experimental assumption.
 """
 
 from typing import Sequence
@@ -15,13 +16,21 @@ from flcore.security.defense.dnc import DefenseResult
 
 
 class CosineClusterDefense:
-    """Filter the lower-cosine cluster relative to the weighted mean update."""
+    """Filter one cosine-score cluster relative to the weighted mean update."""
 
-    def __init__(self, max_iterations=50, tolerance=1e-6):
+    SUPPORTED_SELECTION_RULES = {"high_mean", "largest_cluster"}
+
+    def __init__(self, max_iterations=50, tolerance=1e-6,
+                 selection_rule="high_mean"):
         if max_iterations <= 0 or tolerance < 0:
             raise ValueError("Cosine-cluster max_iterations must be positive and tolerance non-negative")
+        if selection_rule not in self.SUPPORTED_SELECTION_RULES:
+            raise ValueError(
+                "Cosine-cluster selection_rule must be one of: "
+                f"{sorted(self.SUPPORTED_SELECTION_RULES)}")
         self.max_iterations = int(max_iterations)
         self.tolerance = float(tolerance)
+        self.selection_rule = selection_rule
 
     @staticmethod
     def _flatten_update(global_model, client_model):
@@ -76,7 +85,10 @@ class CosineClusterDefense:
         if len(uploaded_weights) != count:
             raise ValueError("Cosine clustering requires one weight per uploaded model")
         if count == 1:
-            return DefenseResult("cosine_cluster", [0.0], [0], [], [])
+            return DefenseResult(
+                "cosine_cluster", [0.0], [0], [], [],
+                selection_rule=self.selection_rule,
+            )
 
         updates = torch.stack([
             self._flatten_update(global_model, model) for model in uploaded_models
@@ -91,17 +103,26 @@ class CosineClusterDefense:
         if assignments is None:
             return DefenseResult(
                 "cosine_cluster", [float(score) for score in scores],
-                list(range(count)), [], [],
+                list(range(count)), [], [], selection_rule=self.selection_rule,
             )
 
         cluster_means = torch.stack([
             scores[assignments == cluster].mean() for cluster in range(2)
         ])
-        trusted_cluster = int(torch.argmax(cluster_means).item())
+        cluster_counts = torch.bincount(assignments, minlength=2)
+        if self.selection_rule == "high_mean":
+            trusted_cluster = int(torch.argmax(cluster_means).item())
+        else:
+            # Under equal cluster sizes, prefer the higher-cosine cluster so
+            # that the result remains deterministic and semantically useful.
+            largest = torch.max(cluster_counts)
+            candidates = torch.where(cluster_counts == largest)[0]
+            best_candidate = torch.argmax(cluster_means[candidates])
+            trusted_cluster = int(candidates[best_candidate].item())
         kept = torch.where(assignments == trusted_cluster)[0].tolist()
         kept_set = set(kept)
         removed = [position for position in range(count) if position not in kept_set]
         return DefenseResult(
             "cosine_cluster", [float(score) for score in scores],
-            kept, removed, [],
+            kept, removed, [], selection_rule=self.selection_rule,
         )
