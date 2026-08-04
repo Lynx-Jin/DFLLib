@@ -1,5 +1,6 @@
 # 🛡️ DFLLib: Detection-oriented Federated Learning Library
 
+
 DFLLib is a PyTorch research framework for **Byzantine model poisoning, robust aggregation, and auditable update-level detection** in federated learning. It extends the training infrastructure of [PFLlib](https://github.com/TsingZ0/PFLlib) with an attack–defense pipeline designed for reproducible security experiments.
 
 > 📦 Generated datasets, checkpoints, experiment logs, and monitor outputs are excluded from version control. Generate or place datasets locally before running experiments.
@@ -10,7 +11,7 @@ DFLLib is a PyTorch research framework for **Byzantine model poisoning, robust a
 - 🧱 **Robust aggregation and detection:** Krum, Multi-Krum, Bulyan, coordinate-wise Trimmed Mean/Median, DnC random-subspace SVD filtering, and AFA-style cosine-score clustering.
 - 🔎 **Per-round auditability:** records scheduled, uploaded, accepted, and blocked clients; pre-defense L0/L2/L∞ and cosine statistics; defense scores; OA, SA, ASR, and dashboard plots.
 - ⚙️ **Experiment control:** independent attack and defense budgets, fixed malicious-client sampling, defense warm-up, and repeated DnC random-subspace filtering.
-- 🧠 **Training/model support:** FedAvg and one-minibatch FedSGD with server SGD/Adam; FedAvgMLP, CNN, VGG11, AlexNet, and small-image ResNet18.
+- 🧠 **Training/model support:** FedAvg and one-minibatch FedSGD with server SGD/Adam; FedAvgMLP, CNN, VGG11, AlexNet, and Resnetxx.
 
 ## 🗂️ Layout
 
