@@ -17,6 +17,9 @@ class clientFedSGD(Client):
     """Compute exactly one stochastic minibatch gradient per FL round."""
 
     def train(self):
+        if self.attack_type == 'poisonedfl' and self.is_malicious:
+            self.train_time_cost['num_rounds'] += 1
+            return  # No private data or clean proxy gradient for PoisonedFL.
         # Keep ``self.batch_size`` as the global upper bound.  Unlike local
         # FedAvg epochs, FedSGD must not discard an entire client merely
         # because its local dataset is smaller than that upper bound: with

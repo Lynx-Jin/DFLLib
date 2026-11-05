@@ -1,5 +1,29 @@
 # `flcore/security` 攻防实现说明
 
+## DFLlib 新增攻防入口
+
+完整机制、默认值、信息边界及可执行对照命令见
+[`scalar-security-port.md`](../../../docs/scalar-security-port.md)。
+
+- `-atk poisonedfl -pfs 8 -pfw 10`：只使用全局模型历史的基础共享载荷攻击。
+  FedAvg提交模型差分；FedSGD/SGD使用`-pfgm sgd_delta`；
+  FedSGD/Adam显式使用`-pfgm adam_proxy`，这是梯度代理，不是Adam精确逆换算。
+- `-atk minmax -amv cosine_oracle -acq .5`：使用恶意干净代理的模型/全局余弦
+  分位数约束，替换原L2可行性约束；不读良性更新或聚类决策。
+  `-amv cosine`为保留L2上界的版本，默认`agnostic`仍走既有实现。
+- `-def scalar_kmeans`：对`cos(P_i,W)`二聚类，保留人数多数簇，平局取高余弦簇。
+- `-def scalar_dbscan`：相同阶段一后，仅在主簇内用`||P_i||`和`cos(P_i,W)`
+  检查紧密DBSCAN子簇及客户端/伙伴历史。后端不接收向量、数据、真恶意标签或比例。
+- `-nc 20 -amr .2 -aseed 0`：总20人中4恶意16良性，不追加客户端。
+- `-defstart 5`前不实际剔除，双标量方法仍收集主簇合格历史；全拒绝时保持全局
+  模型，且不推进Adam状态。
+- `-sclog`打印排序的每客户端模型L2/余弦；聚类和两阶段剔除写入实验目录
+  `security/runN/submitted_scalars.jsonl`；攻击参数写入`attack_trace.jsonl`。
+
+现有`cosine_cluster`及监控余弦参照加权平均**更新**；新方法参照轮次开始的
+**全局模型**。FedSGD的提交P为原有`W+g`载体。新旧指标不混用，亦不将新组合
+称为FLAME原样复现。原有方法说明保留如下。
+
 本目录是项目所有投毒、鲁棒聚合与审计逻辑的唯一入口说明。每次新增或改变 `attack/`、`defense/`、`monitor/` 的行为时，应同步更新本文件；日志中的真恶意标签只用于离线审计，任何防御实现均不得读取它。
 
 ## 统一数据流
