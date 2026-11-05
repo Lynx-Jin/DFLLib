@@ -5,6 +5,7 @@ import argparse
 import os
 import time
 import warnings
+import math
 import numpy as np
 import torchvision
 import logging
@@ -63,6 +64,7 @@ from flcore.trainmodel.transformer import *
 from utils.result_utils import average_data
 from utils.mem_utils import MemReporter
 from utils.experiment_logger import setup_experiment_logger
+from flcore.security.attack.poisonedfl import DEFAULT_POISONEDFL_WINDOW
 
 logger = logging.getLogger()
 logger.setLevel(logging.ERROR)
@@ -85,6 +87,48 @@ def _resolve_image_size(args):
 
 def _resolve_image_channels(args):
     return 1 if "mnist" in args.dataset.lower() else 3
+
+
+def validate_security_options(args):
+    """Validate new attack/defense contracts before creating experiment outputs."""
+    if args.attack_type.lower().replace('-', '').replace('_', '') == 'poisonedfl':
+        args.attack_type = 'poisonedfl'
+    if args.attack_minmax_variant != 'agnostic' and args.attack_type != 'minmax':
+        raise ValueError('Cosine-tailored variants require -atk minmax')
+    if args.attack_cosine_target is not None and not -1 <= args.attack_cosine_target <= 1:
+        raise ValueError('Cosine target must be in [-1, 1]')
+    if args.attack_cosine_search_steps < 2 or not 0 <= args.attack_cosine_quantile <= 1:
+        raise ValueError('Invalid cosine search resolution or proxy quantile')
+    if (not math.isfinite(args.attack_poisonedfl_scale) or args.attack_poisonedfl_scale <= 0
+            or args.attack_poisonedfl_window < 1):
+        raise ValueError('PoisonedFL scale must be finite/positive and window >= 1')
+    if args.attack_type == 'poisonedfl':
+        if args.algorithm not in ('FedAvg', 'FedSGD'):
+            raise ValueError('PoisonedFL currently supports FedAvg and FedSGD')
+        if not 0 <= args.attack_malicious_ratio <= 1 or args.attack_seed < 0:
+            raise ValueError('Require malicious ratio in [0,1] and nonnegative attack seed')
+        if args.algorithm == 'FedSGD':
+            expected = 'adam_proxy' if args.fedsgd_optimizer == 'adam' else 'sgd_delta'
+            if args.attack_poisonedfl_gradient_mode != expected:
+                raise ValueError(f'PoisonedFL with {args.fedsgd_optimizer} requires -pfgm {expected}')
+            if args.fedsgd_momentum != 0 or args.fedsgd_weight_decay != 0:
+                raise ValueError('PoisonedFL adapters require zero server momentum and weight decay')
+            if not math.isfinite(args.fedsgd_learning_rate) or args.fedsgd_learning_rate <= 0:
+                raise ValueError('PoisonedFL gradient adapter requires a finite positive server LR')
+        elif args.attack_poisonedfl_gradient_mode != 'sgd_delta':
+            raise ValueError('adam_proxy is an explicit FedSGD/Adam adaptation')
+    if args.defense_type in ('scalar_kmeans', 'scalar_dbscan'):
+        if args.algorithm not in ('FedAvg', 'FedSGD'):
+            raise ValueError('Scalar defenses currently support FedAvg and FedSGD')
+        widths = (args.concentration_norm_width, args.concentration_cosine_width,
+                  args.concentration_norm_rtol, args.concentration_cosine_atol,
+                  args.scalar_dbscan_eps, args.scalar_dbscan_max_diameter)
+        if any(not math.isfinite(v) or v <= 0 for v in widths):
+            raise ValueError('Scalar widths, tolerances, eps and diameter must be finite/positive')
+        if (args.concentration_min_group < 2 or args.concentration_clean_max_count < 0
+                or not 1 <= args.concentration_min_history <= args.concentration_history_window
+                or not 0 < args.concentration_frequency <= 1 or args.defense_start_round < 0):
+            raise ValueError('Invalid scalar density/history/warm-up parameters')
 
 
 def run(args):
@@ -570,7 +614,7 @@ if __name__ == "__main__":
 
      # Attack configuration
     parser.add_argument('-atk', "--attack_type", type=str, default="none",
-                        help="Attack type: none | label_flip | free_rider | minmax | minsum | fang")
+                        help="Attack type: none | label_flip | free_rider | minmax | minsum | fang | poisonedfl")
     parser.add_argument('-amr', "--attack_malicious_ratio", type=float, default=0.0,
                         help="Ratio of malicious clients among all clients")
     parser.add_argument('-aseed', "--attack_seed", type=int, default=0,
@@ -586,6 +630,16 @@ if __name__ == "__main__":
                         help="Lambda search tolerance for Min-Max/Min-Sum")
     parser.add_argument('-amaxsteps', "--attack_search_max_steps", type=int, default=80,
                         help="Maximum lambda search iterations for Min-Max/Min-Sum")
+    parser.add_argument('-amv', '--attack_minmax_variant', choices=['agnostic', 'cosine', 'cosine_oracle'],
+                        default='agnostic', help='Cosine variants use malicious proxies only')
+    parser.add_argument('-act', '--attack_cosine_target', type=float, default=None)
+    parser.add_argument('-acs', '--attack_cosine_search_steps', type=int, default=256)
+    parser.add_argument('-acq', '--attack_cosine_quantile', type=float, default=.5)
+    parser.add_argument('-pfs', '--attack_poisonedfl_scale', type=float, default=8.)
+    parser.add_argument('-pfw', '--attack_poisonedfl_window', type=int, default=DEFAULT_POISONEDFL_WINDOW,
+                        help='Project feedback interval 10; pass 50 for the author setting')
+    parser.add_argument('-pfgm', '--attack_poisonedfl_gradient_mode', choices=['sgd_delta', 'adam_proxy'],
+                        default='sgd_delta', help='adam_proxy is NOT an exact Adam inverse')
     parser.add_argument('-fmar', "--fang_assumed_malicious_ratio", type=float, default=0.2,
                         help="Public Krum Byzantine budget known by the oracle Fang-Krum attack")
     parser.add_argument('-amon', "--attack_monitor", action='store_true',
@@ -602,8 +656,8 @@ if __name__ == "__main__":
     # an AFA-style cosine baseline, not a claim of an exact AFA reproduction.
     parser.add_argument('-def', "--defense_type", type=str, default="none",
                         choices=["none", "dnc", "cosine_cluster", "krum", "multikrum",
-                                 "bulyan", "trimmedmean", "median"],
-                        help="Robust aggregation defense: none | dnc | cosine_cluster | krum | multikrum | bulyan | trimmedmean | median")
+                                 "bulyan", "trimmedmean", "median", "scalar_kmeans", "scalar_dbscan"],
+                        help="Robust aggregation; scalar_* use submitted-model/global features")
     parser.add_argument('-defstart', "--defense_start_round", type=int, default=0,
                         help="Start applying the selected defense at this communication round; 0 means immediately")
     parser.add_argument('-rmar', "--robust_assumed_malicious_ratio", type=float, default=0.2,
@@ -627,9 +681,26 @@ if __name__ == "__main__":
     parser.add_argument('-ccselect', "--cosine_cluster_selection_rule", type=str,
                         choices=["high_mean", "largest_cluster"], default="high_mean",
                         help="Cosine-cluster trusted group: high_mean cosine or largest_cluster")
+    parser.add_argument('-schr', '--concentration_norm_width', type=float, default=.001)
+    parser.add_argument('-schc', '--concentration_cosine_width', type=float, default=.001)
+    parser.add_argument('-scnorm', '--concentration_norm_rtol', type=float, default=1e-6)
+    parser.add_argument('-sccos', '--concentration_cosine_atol', type=float, default=1e-6)
+    parser.add_argument('-scmin', '--concentration_min_group', type=int, default=3)
+    parser.add_argument('-scbase', '--concentration_clean_max_count', type=int, default=1)
+    parser.add_argument('-schist', '--concentration_history_window', type=int, default=10)
+    parser.add_argument('-scobs', '--concentration_min_history', type=int, default=3)
+    parser.add_argument('-scfreq', '--concentration_frequency', type=float, default=.8)
+    parser.add_argument('-sde', '--scalar_dbscan_eps', type=float, default=1.)
+    parser.add_argument('-sdd', '--scalar_dbscan_max_diameter', type=float, default=1.)
+    parser.add_argument('-sclog', '--scalar_verbose', action='store_true',
+                        help='Print one submitted-model cosine/norm per client, sorted by cosine')
 
 
     args = parser.parse_args()
+    try:
+        validate_security_options(args)
+    except ValueError as error:
+        parser.error(str(error))
     experiment_logger = setup_experiment_logger(args)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id

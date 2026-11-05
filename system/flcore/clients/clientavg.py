@@ -10,6 +10,10 @@ class clientAVG(Client):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
 
     def train(self):
+        if self.attack_type == 'poisonedfl' and self.is_malicious:
+            # The global-model-only attacker submits a centrally crafted payload.
+            self.train_time_cost['num_rounds'] += 1
+            return
         trainloader = self.load_train_data()
         # self.model.to(self.device)
         self.model.train()

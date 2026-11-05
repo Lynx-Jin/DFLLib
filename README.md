@@ -1,11 +1,11 @@
-# 🛡️ DFLLib: Detection-oriented Federated Learning Library
+# 🛡️ DFLlib: Detection-oriented Federated Learning Library
 
 
-DFLLib is a PyTorch research framework for **Byzantine model poisoning, robust aggregation, and auditable update-level detection** in federated learning. It extends the training infrastructure of [PFLlib](https://github.com/TsingZ0/PFLlib) with an attack–defense pipeline designed for reproducible security experiments.
+DFLlib is a PyTorch research framework for **Byzantine model poisoning, robust aggregation, and auditable update-level detection** in federated learning. It extends the training infrastructure of [PFLlib](https://github.com/TsingZ0/PFLlib) with an attack–defense pipeline designed for reproducible security experiments.
 
 > 📦 Generated datasets, checkpoints, experiment logs, and monitor outputs are excluded from version control. Generate or place datasets locally before running experiments.
 
-## ✨ DFLLib extensions
+## ✨ DFLlib extensions
 
 - 🧪 **Threat-model-aware attacks:** AGR-agnostic Min-Max and Min-Sum; oracle, Krum-targeted Fang attack; label flipping; and a Gaussian free-rider baseline.
 - 🧱 **Robust aggregation and detection:** Krum, Multi-Krum, Bulyan, coordinate-wise Trimmed Mean/Median, DnC random-subspace SVD filtering, and AFA-style cosine-score clustering.
@@ -24,6 +24,23 @@ DFLLib is a PyTorch research framework for **Byzantine model poisoning, robust a
 | `system/flcore/security/README.md` | Security-module implementation notes and detailed usage. |
 
 ## 🧪 Attacks
+
+New: **PoisonedFL**, **cosine-tailored Min-Max**, and **majority KMeans + compact
+DBSCAN with eligible history**. See the complete
+[method, threat-model and command guide](docs/scalar-security-port.md).
+Use `-nc 20 -amr .2` for 20 total clients with four malicious clients; none are
+appended. The new `scalar_*` defenses use submitted-model/global-model features,
+separate from the existing update/weighted-mean cosine baseline.
+
+| New option | Behavior |
+|---|---|
+| `-atk poisonedfl` | Global-model-only multi-round shared-payload attack; `-pfs 8 -pfw 10`; FedSGD/Adam requires explicit `-pfgm adam_proxy`. |
+| `-atk minmax -amv cosine_oracle` | Malicious-proxy cosine feasibility, replacing the agnostic L2 bound; target via `-acq .5` or `-act`. |
+| `-def scalar_kmeans` | Stage-one submitted/global cosine KMeans, keeping the larger cluster. |
+| `-def scalar_dbscan` | Same majority stage followed by compact two-scalar DBSCAN and client/pair persistence. |
+
+The Adam adapter is a gradient proxy, not an exact inverse of Adam. The detector
+is an engineering composition, not an exact FLAME/HDBSCAN reproduction.
 
 Shared arguments: `-atk` (default `none`), `-amr` malicious-client ratio (default `0.0`), and `-aseed` malicious-ID seed (default `0`). Enable auditing with `-amon`; configure it with `-amondir attack_monitor`, `-amonplot 10`, and `-amoneps 0.0`.
 

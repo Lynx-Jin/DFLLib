@@ -5,13 +5,17 @@ import h5py
 import copy
 import time
 import random
+import json
 from utils.data_utils import read_client_data
 from utils.dlg import DLG
-from flcore.security.attack import FangKrumAttack, MinMaxMinSumAttack
+from flcore.security.attack import (
+    FangKrumAttack, MinMaxMinSumAttack, CosineTailoredMinMaxAttack, PoisonedFLAttack,
+)
 from flcore.security.defense import (
     BulyanDefense, CoordinateDefense, CosineClusterDefense, DnCDefense,
-    KrumDefense, MultiKrumDefense,
+    KrumDefense, MultiKrumDefense, ScalarModelDefense,
 )
+from flcore.security.defense.scalar_model import submitted_model_scalars
 from flcore.security.monitor import UpdateMonitor
 
 
@@ -82,8 +86,28 @@ class Server(object):
         self.attack_seed = getattr(args, 'attack_seed', 0)
         self.attack_exclude_malicious_in_eval = getattr(args, 'attack_exclude_malicious_in_eval', False)
         self.model_poison_attack = None
+        self.poisonedfl_attack = None
         normalized_attack = self.attack_type.lower().replace('-', '').replace('_', '')
-        if normalized_attack in {'minmax', 'minsum'}:
+        if normalized_attack == 'poisonedfl':
+            self.attack_type = self.args.attack_type = 'poisonedfl'
+            if self.algorithm == 'FedSGD':
+                expected = 'adam_proxy' if args.fedsgd_optimizer.lower() == 'adam' else 'sgd_delta'
+                if getattr(args, 'attack_poisonedfl_gradient_mode', 'sgd_delta') != expected:
+                    raise ValueError(f'PoisonedFL server optimizer requires -pfgm {expected}')
+            self.poisonedfl_attack = PoisonedFLAttack(
+                scale=getattr(args, 'attack_poisonedfl_scale', 8.),
+                window=getattr(args, 'attack_poisonedfl_window', 10), seed=self.attack_seed)
+        elif normalized_attack == 'minmax' and getattr(args, 'attack_minmax_variant', 'agnostic') != 'agnostic':
+            self.model_poison_attack = CosineTailoredMinMaxAttack(
+                deviation=getattr(args, 'attack_deviation', 'std'),
+                lambda_init=getattr(args, 'attack_lambda_init', 10.),
+                tolerance=getattr(args, 'attack_search_tolerance', 1e-5),
+                max_steps=getattr(args, 'attack_search_max_steps', 80),
+                variant=args.attack_minmax_variant,
+                cosine_target=getattr(args, 'attack_cosine_target', None),
+                cosine_search_steps=getattr(args, 'attack_cosine_search_steps', 256),
+                cosine_quantile=getattr(args, 'attack_cosine_quantile', .5))
+        elif normalized_attack in {'minmax', 'minsum'}:
             self.model_poison_attack = MinMaxMinSumAttack(
                 attack=self.attack_type,
                 deviation=getattr(args, 'attack_deviation', 'std'),
@@ -119,7 +143,23 @@ class Server(object):
         self.cosine_cluster_defense = None
         self.robust_defense = None
         self.defense_aggregated_model = None
-        if self.defense_type == 'dnc':
+        self.skip_aggregation = False
+        self.security_log_dir = os.path.join(self.experiment_log_dir, 'security', f'run{times}')
+        if self.defense_type in ('scalar_kmeans', 'scalar_dbscan'):
+            self.robust_defense = ScalarModelDefense(
+                method=self.defense_type, verbose=getattr(args, 'scalar_verbose', False),
+                norm_width=getattr(args, 'concentration_norm_width', .001),
+                cosine_width=getattr(args, 'concentration_cosine_width', .001),
+                min_group=getattr(args, 'concentration_min_group', 3),
+                clean_max_count=getattr(args, 'concentration_clean_max_count', 1),
+                history_window=getattr(args, 'concentration_history_window', 10),
+                min_history=getattr(args, 'concentration_min_history', 3),
+                frequency=getattr(args, 'concentration_frequency', .8),
+                cosine_atol=getattr(args, 'concentration_cosine_atol', 1e-6),
+                norm_rtol=getattr(args, 'concentration_norm_rtol', 1e-6),
+                eps=getattr(args, 'scalar_dbscan_eps', 1.),
+                max_diameter=getattr(args, 'scalar_dbscan_max_diameter', 1.))
+        elif self.defense_type == 'dnc':
             self.dnc_defense = DnCDefense(
                 assumed_malicious_ratio=getattr(args, 'dnc_assumed_malicious_ratio', 0.2),
                 filter_fraction=getattr(args, 'dnc_filter_fraction', 1.0),
@@ -153,7 +193,9 @@ class Server(object):
         self.update_monitor = None
         self.update_monitor_round = 0
         # A defense run must always leave an audit trail, even without -amon.
-        if getattr(args, 'attack_monitor', False) or self.robust_defense is not None:
+        if (getattr(args, 'attack_monitor', False) or self.robust_defense is not None
+                or self.poisonedfl_attack is not None
+                or isinstance(self.model_poison_attack, CosineTailoredMinMaxAttack)):
             monitor_root = getattr(
                 args, 'attack_monitor_dir', '../results/attack_monitor')
             run_name = f"run{self.times}"
@@ -224,6 +266,7 @@ class Server(object):
         self.uploaded_weights = []
         self.uploaded_models = []
         self.defense_aggregated_model = None
+        self.skip_aggregation = False
         tot_samples = 0
         for client in active_clients:
             try:
@@ -236,6 +279,14 @@ class Server(object):
                 self.uploaded_ids.append(client.id)
                 self.uploaded_weights.append(client.train_samples)
                 self.uploaded_models.append(client.model)
+        if self.poisonedfl_attack is not None:
+            stats = self.poisonedfl_attack.apply(
+                self.global_model, self.uploaded_ids, self.uploaded_models, self.malicious_ids,
+                gradient_learning_rate=(self.args.fedsgd_learning_rate if self.algorithm == 'FedSGD' else None),
+                gradient_mode=getattr(self.args, 'attack_poisonedfl_gradient_mode', 'sgd_delta'))
+            self._record_security('attack_trace.jsonl', dict(round=self.update_monitor_round, attack=stats))
+            print(f'[POISONEDFL] phase={stats["phase"]} scale={stats["scale"]:.6g} '
+                  f'mapping={stats["gradient_mapping"]} uploaded_L2={stats["uploaded_update_norm"]:.6g}')
         if self.model_poison_attack is not None:
             stats = self.model_poison_attack.apply(
                 global_model=self.global_model,
@@ -244,6 +295,11 @@ class Server(object):
                 malicious_ids=self.malicious_ids,
             )
             if stats is not None:
+                if isinstance(self.model_poison_attack, CosineTailoredMinMaxAttack):
+                    self._record_security('attack_trace.jsonl', dict(round=self.update_monitor_round, attack=stats._asdict()))
+                    print(f'[MINMAX/{stats.variant}] cos={stats.final_cosine:.10f} '
+                          f'target={stats.cosine_target:.10f} reached={stats.cosine_target_reached} '
+                          f'lambda={stats.lambda_value:.6g} cap_reached={stats.search_cap_reached}')
                 print(
                     f"[{stats.attack.upper()}] malicious={stats.malicious_clients} "
                     f"lambda={stats.lambda_value:.6g} "
@@ -268,7 +324,16 @@ class Server(object):
         pre_defense_models = list(self.uploaded_models)
         pre_defense_weights = list(self.uploaded_weights)
         defense_result = None
-        if (self.robust_defense is not None
+        if isinstance(self.robust_defense, ScalarModelDefense):
+            # Update main-cluster eligible histories throughout warm-up, as in
+            # the source experiment, but apply no rejection before defstart.
+            proposal = self.robust_defense.filter(
+                self.global_model, pre_defense_models, pre_defense_weights,
+                round_id=self.update_monitor_round, client_ids=pre_defense_ids,
+                filtering_enabled=self.update_monitor_round >= self.defense_start_round)
+            if self.update_monitor_round >= self.defense_start_round:
+                defense_result = proposal
+        elif (self.robust_defense is not None
                 and self.update_monitor_round >= self.defense_start_round):
             defense_result = self.robust_defense.filter(
                 global_model=self.global_model,
@@ -276,6 +341,15 @@ class Server(object):
                 uploaded_weights=pre_defense_weights,
                 round_id=self.update_monitor_round,
             )
+
+        if (isinstance(self.robust_defense, ScalarModelDefense)
+                or self.poisonedfl_attack is not None
+                or isinstance(self.model_poison_attack, CosineTailoredMinMaxAttack)):
+            norms, cosines = submitted_model_scalars(self.global_model, pre_defense_models, pre_defense_ids)
+            self._record_security('submitted_scalars.jsonl', dict(
+                round=self.update_monitor_round, norms=norms, cosines=cosines,
+                decision=(self.robust_defense.last_details
+                          if isinstance(self.robust_defense, ScalarModelDefense) else None)))
 
         if self.update_monitor is not None:
             self.update_monitor.record(
@@ -304,10 +378,16 @@ class Server(object):
         # FedAvg weights must describe the final set that is actually aggregated.
         final_samples = sum(self.uploaded_weights)
         if final_samples <= 0:
+            if isinstance(self.robust_defense, ScalarModelDefense) and not self.uploaded_ids:
+                self.skip_aggregation = True
+                print('[scalar defense] no accepted clients; keep global parameters and optimizer state')
+                return
             raise RuntimeError("No client updates remain for aggregation")
         self.uploaded_weights = [weight / final_samples for weight in self.uploaded_weights]
 
     def aggregate_parameters(self):
+        if getattr(self, 'skip_aggregation', False):
+            return
         assert (len(self.uploaded_models) > 0)
 
         if self.defense_aggregated_model is not None:
@@ -329,6 +409,11 @@ class Server(object):
     def add_parameters(self, w, client_model):
         for server_param, client_param in zip(self.global_model.parameters(), client_model.parameters()):
             server_param.data += client_param.data.clone() * w
+
+    def _record_security(self, filename, record):
+        os.makedirs(self.security_log_dir, exist_ok=True)
+        with open(os.path.join(self.security_log_dir, filename), 'a', encoding='utf-8') as stream:
+            stream.write(json.dumps(record, allow_nan=False) + '\n')
 
     @staticmethod
     def _aggregate_model_buffers(target_model, source_models, weights):
