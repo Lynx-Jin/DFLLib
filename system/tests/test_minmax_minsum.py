@@ -64,13 +64,14 @@ class MinMaxMinSumAttackTest(unittest.TestCase):
             self.honest_update,
         ))
 
-    def test_minsum_uses_minimum_proxy_sum_score(self):
+    def test_minsum_preserves_maximum_proxy_sum_reference(self):
         _, stats, _, poisoned = self.run_attack("minsum")
         self.assertIsNotNone(stats)
         self.assertTrue(torch.equal(poisoned[0], poisoned[1]))
         self.assertTrue(torch.equal(poisoned[1], poisoned[2]))
         proxies = torch.stack(self.clean_updates)
-        threshold = torch.cdist(proxies, proxies).square().sum(dim=1).min()
+        threshold = torch.cdist(proxies, proxies).square().sum(dim=1).max()
+        self.assertAlmostEqual(stats.threshold, threshold.item(), places=6)
         score = torch.norm(
             proxies - poisoned[0], dim=1).square().sum()
         self.assertLessEqual(score.item(), threshold.item() + 1e-5)

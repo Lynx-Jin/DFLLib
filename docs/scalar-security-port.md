@@ -1,5 +1,8 @@
 # DFLlib: PoisonedFL, cosine-tailored Min-Max, and scalar defenses
 
+Updated on 2026-11-18. The previous legacy Min-Sum and monitor test mismatches are resolved. Min-Sum retains the existing maximum-reference behavior, and the monitor test uses the weighted-mean update reference. See the [current alignment record](security-alignment.md).
+
+
 The new options extend `flcore/security`. Existing AGR-agnostic Min-Max/Min-Sum,
 Fang and aggregators retain their numerical implementations. New methods support
 FedAvg and the existing one-minibatch FedSGD. This port does not replace DFLlib's

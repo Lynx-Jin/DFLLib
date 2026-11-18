@@ -56,16 +56,16 @@ Attack options:
 - `-atol`: lambda search tolerance.
 - `-amaxsteps`: maximum search iterations.
 
-Min-Sum follows the released NDSS implementation and uses the minimum proxy
-sum-distance as its threshold. This differs from the `max` printed in Equation
-(7) of the paper.
+Min-Sum preserves the existing project experiment and uses the maximum
+proxy sum of squared distances as its threshold. The tests verify this
+maximum-reference behavior explicitly.
 
 ## Monitoring
 
 The monitor runs after poisoning and before aggregation. It records:
 
 - L0, L2, and L-infinity norms of `client_model - previous_global_model`;
-- cosine similarity between the uploaded model and previous global model;
+- cosine similarity between each update and the sample-weighted mean update;
 - client id and benign/malicious identity.
 
 Options:
@@ -81,5 +81,6 @@ Options:
 With the project environment active:
 
 ```bash
-python -m unittest tests.test_minmax_minsum tests.test_update_monitor -v
+python -m unittest discover -s tests -p 'test_minmax_minsum.py' -v
+python -m unittest discover -s tests -p 'test_update_monitor.py' -v
 ```

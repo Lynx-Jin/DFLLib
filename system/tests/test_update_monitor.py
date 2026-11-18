@@ -12,7 +12,7 @@ from flcore.security.monitor import UpdateMonitor
 
 
 class UpdateMonitorTest(unittest.TestCase):
-    def test_records_update_norms_and_model_to_global_cosine(self):
+    def test_records_update_norms_and_weighted_mean_update_cosine(self):
         global_model = nn.Linear(2, 1, bias=False)
         with torch.no_grad():
             global_model.weight.copy_(torch.tensor([[1.0, 2.0]]))
@@ -29,6 +29,7 @@ class UpdateMonitorTest(unittest.TestCase):
                 global_model=global_model,
                 uploaded_ids=[0, 1],
                 uploaded_models=[benign, malicious],
+                uploaded_weights=[0.75, 0.25],
                 malicious_ids=[1],
             )
             with open(monitor.client_csv, newline="", encoding="utf-8") as handle:
@@ -40,9 +41,9 @@ class UpdateMonitorTest(unittest.TestCase):
         self.assertEqual(int(rows[0]["l0"]), 1)
         self.assertAlmostEqual(float(rows[0]["l2"]), 1.0)
         self.assertAlmostEqual(float(rows[0]["linf"]), 1.0)
-        expected_cosine = 6.0 / math.sqrt(40.0)
+        expected_cosine = 0.75 / math.sqrt(0.75 ** 2 + 0.5 ** 2)
         self.assertAlmostEqual(
-            float(rows[0]["cosine_to_global"]), expected_cosine, places=6)
+            float(rows[0]["cosine_to_weighted_mean_update"]), expected_cosine, places=6)
 
 
 if __name__ == "__main__":

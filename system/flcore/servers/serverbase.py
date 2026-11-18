@@ -1,4 +1,4 @@
-﻿import torch
+import torch
 import os
 import numpy as np
 import h5py
@@ -6,16 +6,18 @@ import copy
 import time
 import random
 import json
-from utils.data_utils import read_client_data
+from dataclasses import asdict
+from utils.data_utils import process_image, read_client_data
 from utils.dlg import DLG
 from flcore.security.attack import (
     FangKrumAttack, MinMaxMinSumAttack, CosineTailoredMinMaxAttack, PoisonedFLAttack,
 )
+from flcore.security.backdoor import BackdoorEvaluator, build_backdoor_attack
 from flcore.security.defense import (
     BulyanDefense, CoordinateDefense, CosineClusterDefense, DnCDefense,
-    KrumDefense, MultiKrumDefense, ScalarModelDefense,
+    KrumDefense, MultiKrumDefense, ProtoCleanDefense, ProtoProbeDefense,
 )
-from flcore.security.defense.scalar_model import submitted_model_scalars
+from flcore.security.defense.scalar_model import ScalarModelDefense, submitted_model_scalars
 from flcore.security.monitor import UpdateMonitor
 
 
@@ -31,6 +33,10 @@ class Server(object):
         self.batch_size = args.batch_size
         self.learning_rate = args.local_learning_rate
         self.global_model = copy.deepcopy(args.model)
+        # At the beginning of round t, this holds theta_(t-1).  It gives
+        # update-aware attacks (Neurotoxin/F3BA) the same historical global
+        # state that their original threat models assume.
+        self.previous_global_state = None
         self.num_clients = args.num_clients
         self.join_ratio = args.join_ratio
         self.random_join_ratio = args.random_join_ratio
@@ -129,6 +135,18 @@ class Server(object):
         else:
             self.malicious_ids = []
 
+        self.backdoor_name = getattr(args, 'backdoor', 'none').lower()
+        self.backdoor_evaluator = None
+        if self.backdoor_name != 'none':
+            evaluator_attack = build_backdoor_attack(
+                args, client_id=None, is_malicious=False, evaluation=True)
+            evaluator_attack.configure_coalition(self.malicious_ids)
+            self.backdoor_evaluator = BackdoorEvaluator(evaluator_attack, self.device)
+            print(f"Backdoor experiment: {self.backdoor_name} "
+                  f"(target={evaluator_attack.spec.target_label}, "
+                  f"schedule={evaluator_attack.spec.start_round}:"
+                  f"{evaluator_attack.spec.end_round})")
+
         if len(self.malicious_ids) > 0:
             try:
                 self.save_item(self.malicious_ids, 'malicious_ids')
@@ -141,6 +159,8 @@ class Server(object):
             raise ValueError("defense_start_round must be non-negative")
         self.dnc_defense = None
         self.cosine_cluster_defense = None
+        self.proto_clean_defense = None
+        self.proto_probe_defense = None
         self.robust_defense = None
         self.defense_aggregated_model = None
         self.skip_aggregation = False
@@ -172,8 +192,45 @@ class Server(object):
             self.cosine_cluster_defense = CosineClusterDefense(
                 max_iterations=getattr(args, 'cosine_cluster_max_iterations', 50),
                 tolerance=getattr(args, 'cosine_cluster_tolerance', 1e-6),
+                selection_rule=getattr(args, 'cosine_cluster_selection_rule', 'high_mean'),
             )
             self.robust_defense = self.cosine_cluster_defense
+        elif self.defense_type == 'proto-clean':
+            reference_data, source = self._build_proto_clean_reference_data()
+            self.proto_clean_defense = ProtoCleanDefense(
+                reference_data=reference_data,
+                num_classes=self.num_classes,
+                device=self.device,
+                batch_size=getattr(args, 'proto_clean_batch_size', 64),
+                threshold=getattr(args, 'proto_clean_threshold', 3.5),
+                assumed_malicious_ratio=getattr(args, 'proto_clean_assumed_malicious_ratio', 0.2),
+                prototype_weight=getattr(args, 'proto_clean_prototype_weight', 1.0),
+                logit_weight=getattr(args, 'proto_clean_logit_weight', 0.25),
+            )
+            self.robust_defense = self.proto_clean_defense
+            print(f"ProtoClean reference set: {len(reference_data)} clean samples ({source})")
+        elif self.defense_type == 'proto-probe':
+            image_size = int(getattr(args, 'image_size', 0))
+            dataset_name = self.dataset.lower()
+            if image_size <= 0:
+                image_size = 32 if 'cifar' in dataset_name else 28 if 'mnist' in dataset_name else 224
+            image_channels = 1 if 'mnist' in dataset_name else 3
+            self.proto_probe_defense = ProtoProbeDefense(
+                input_shape=(image_channels, image_size, image_size),
+                num_classes=self.num_classes,
+                device=self.device,
+                seeds_per_class=getattr(args, 'proto_probe_seeds_per_class', 4),
+                optimization_steps=getattr(args, 'proto_probe_steps', 10),
+                step_size=getattr(args, 'proto_probe_step_size', 0.1),
+                boundary_margin=getattr(args, 'proto_probe_boundary_margin', 0.1),
+                input_min=getattr(args, 'proto_probe_input_min', -1.0),
+                input_max=getattr(args, 'proto_probe_input_max', 1.0),
+                seed=getattr(args, 'proto_probe_seed', 0),
+            )
+            self.robust_defense = self.proto_probe_defense
+            print(
+                "ProtoProbe diagnostic: random unlabelled seeds, global-head "
+                "class directions, keep-all scoring")
         elif self.defense_type == 'krum':
             self.robust_defense = KrumDefense(args.robust_assumed_malicious_ratio)
         elif self.defense_type == 'multikrum':
@@ -194,6 +251,7 @@ class Server(object):
         self.update_monitor_round = 0
         # A defense run must always leave an audit trail, even without -amon.
         if (getattr(args, 'attack_monitor', False) or self.robust_defense is not None
+                or self.backdoor_evaluator is not None
                 or self.poisonedfl_attack is not None
                 or isinstance(self.model_poison_attack, CosineTailoredMinMaxAttack)):
             monitor_root = getattr(
@@ -207,6 +265,55 @@ class Server(object):
             print(f"Attack/defense monitoring enabled: {self.update_monitor.output_dir}")
 
 
+    def _build_proto_clean_reference_data(self):
+        """Load a server-owned clean set, or use a simulation-only test fallback.
+
+        A supplied ``.npz`` may contain either ``x``/``y`` arrays or PFLlib's
+        usual object ``data`` dictionary with ``x``/``y`` fields.  If it is not
+        supplied, the simulator pools held-out client test partitions solely
+        to make the baseline immediately reproducible; production experiments
+        should always provide ``--pc_ref``.
+        """
+        reference_path = getattr(self.args, 'proto_clean_reference_path', '')
+        if reference_path:
+            with np.load(reference_path, allow_pickle=True) as archive:
+                if 'data' in archive:
+                    payload = archive['data'].tolist()
+                elif 'x' in archive and 'y' in archive:
+                    payload = {'x': archive['x'], 'y': archive['y']}
+                else:
+                    raise ValueError("ProtoClean reference .npz must contain x/y or data{x,y}")
+            candidates = process_image(payload)
+            source = f"server file: {reference_path}"
+        else:
+            candidates = []
+            for client_id in range(self.num_clients):
+                candidates.extend(read_client_data(self.dataset, client_id, is_train=False, few_shot=0))
+            source = "simulation fallback: pooled held-out client test partitions"
+
+        samples_per_class = int(getattr(self.args, 'proto_clean_samples_per_class', 10))
+        if samples_per_class <= 0:
+            raise ValueError("proto_clean_samples_per_class must be positive")
+        rng = np.random.RandomState(getattr(self.args, 'proto_clean_seed', 0))
+        buckets = [[] for _ in range(self.num_classes)]
+        for item in candidates:
+            x, y = item
+            label = int(y.item())
+            if 0 <= label < self.num_classes and torch.is_tensor(x):
+                buckets[label].append((x.detach().cpu(), y.detach().cpu()))
+        reference_data = []
+        missing = []
+        for label, bucket in enumerate(buckets):
+            if not bucket:
+                missing.append(label)
+                continue
+            indices = rng.permutation(len(bucket))[:samples_per_class]
+            reference_data.extend(bucket[index] for index in indices)
+        if missing:
+            print(f"[ProtoClean] warning: reference set has no samples for classes {missing}")
+        return reference_data, source
+
+
     def set_clients(self, clientObj):
         for i, train_slow, send_slow in zip(range(self.num_clients), self.train_slow_clients, self.send_slow_clients):
             train_data = read_client_data(self.dataset, i, is_train=True, few_shot=self.few_shot)
@@ -218,6 +325,7 @@ class Server(object):
                             train_slow=train_slow, 
                             send_slow=send_slow,
                             is_malicious=(i in getattr(self, 'malicious_ids', [])))
+            client.configure_backdoor_coalition(self.malicious_ids)
             self.clients.append(client)
 
     # random select slow clients
@@ -252,6 +360,8 @@ class Server(object):
             start_time = time.time()
             
             client.set_parameters(self.global_model)
+            client.begin_attack_round(self.update_monitor_round,
+                                      self.previous_global_state)
 
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
@@ -362,7 +472,7 @@ class Server(object):
                 selected_ids=[client.id for client in self.selected_clients],
                 defense_result=defense_result,
             )
-            self.update_monitor_round += 1
+        self.update_monitor_round += 1
 
         if defense_result is not None:
             self.defense_aggregated_model = defense_result.aggregated_model
@@ -386,9 +496,11 @@ class Server(object):
         self.uploaded_weights = [weight / final_samples for weight in self.uploaded_weights]
 
     def aggregate_parameters(self):
-        if getattr(self, 'skip_aggregation', False):
+        if getattr(self, "skip_aggregation", False):
             return
         assert (len(self.uploaded_models) > 0)
+
+        self.previous_global_state = self._snapshot_global_state()
 
         if self.defense_aggregated_model is not None:
             self._aggregate_model_buffers(
@@ -406,14 +518,21 @@ class Server(object):
         self._aggregate_model_buffers(
             self.global_model, self.uploaded_models, self.uploaded_weights)
 
-    def add_parameters(self, w, client_model):
-        for server_param, client_param in zip(self.global_model.parameters(), client_model.parameters()):
-            server_param.data += client_param.data.clone() * w
-
     def _record_security(self, filename, record):
         os.makedirs(self.security_log_dir, exist_ok=True)
         with open(os.path.join(self.security_log_dir, filename), 'a', encoding='utf-8') as stream:
             stream.write(json.dumps(record, allow_nan=False) + '\n')
+
+    def _snapshot_global_state(self):
+        """Detach current global parameters for next round's attack hooks."""
+        return {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in self.global_model.named_parameters()
+        }
+
+    def add_parameters(self, w, client_model):
+        for server_param, client_param in zip(self.global_model.parameters(), client_model.parameters()):
+            server_param.data += client_param.data.clone() * w
 
     @staticmethod
     def _aggregate_model_buffers(target_model, source_models, weights):
@@ -464,6 +583,23 @@ class Server(object):
 
     def save_global_model(self):
         torch.save(self.global_model, self._global_model_path())
+        patterns = self._backdoor_trigger_patterns()
+        if patterns:
+            state = {
+                "spec": asdict(self.backdoor_evaluator.attack.spec),
+                "patch_patterns": patterns,
+            }
+            model_path = self._global_model_path()
+            torch.save(state, model_path[:-3] + "_backdoor.pt")
+
+    def _backdoor_trigger_patterns(self):
+        if self.backdoor_name != "a3fl":
+            return []
+        return [
+            client.backdoor.patch_pattern.detach().cpu().clone()
+            for client in self.clients
+            if client.is_malicious and client.backdoor.patch_pattern is not None
+        ]
 
     def load_model(self):
         model_path = self._global_model_path()
@@ -564,6 +700,18 @@ class Server(object):
         OA = test_acc
         SA = (src_correct_sum / src_total_sum) if src_total_sum > 0 else 0.0
         ASR = (src_to_tgt_sum / src_total_sum) if src_total_sum > 0 else 0.0
+        if self.backdoor_evaluator is not None:
+            evaluation_clients = self.clients
+            if self.attack_exclude_malicious_in_eval:
+                evaluation_clients = [
+                    client for client in self.clients
+                    if client.id not in self.malicious_ids
+                ]
+            src_total_sum, src_correct_sum, src_to_tgt_sum = self.backdoor_evaluator.evaluate(
+                self.global_model, evaluation_clients,
+                trigger_patterns=self._backdoor_trigger_patterns())
+            SA = (src_correct_sum / src_total_sum) if src_total_sum > 0 else 0.0
+            ASR = (src_to_tgt_sum / src_total_sum) if src_total_sum > 0 else 0.0
         train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1])
         accs = [a / n for a, n in zip(stats[2], stats[1])]
         aucs = [a / n for a, n in zip(stats[3], stats[1])]
@@ -596,7 +744,7 @@ class Server(object):
                 attack_success_rate=ASR,
                 # Untargeted poisoning has no source/target labels; its printed
                 # zero ASR must not be plotted as a meaningful backdoor metric.
-                asr_available=src_total_sum > 0,
+                asr_available=(self.backdoor_evaluator is not None or src_total_sum > 0),
             )
 
         print("Averaged Train Loss: {:.4f}".format(train_loss))

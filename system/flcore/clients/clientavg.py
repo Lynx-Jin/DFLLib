@@ -14,9 +14,10 @@ class clientAVG(Client):
             # The global-model-only attacker submits a centrally crafted payload.
             self.train_time_cost['num_rounds'] += 1
             return
-        trainloader = self.load_train_data()
+        trainloader = self.load_train_data(apply_backdoor=self.backdoor.spec.name != "a3fl")
         # self.model.to(self.device)
         self.model.train()
+        self.backdoor.before_local_train(self.model)
         
         start_time = time.time()
 
@@ -33,10 +34,12 @@ class clientAVG(Client):
                 y = y.to(self.device)
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
+                x, y = self.backdoor.before_batch(self.model, x, y)
                 output = self.model(x)
                 loss = self.loss(output, y)
                 self.optimizer.zero_grad()
                 loss.backward()
+                self.backdoor.mask_gradients(self.model)
                 self.optimizer.step()
 
         # self.model.cpu()
