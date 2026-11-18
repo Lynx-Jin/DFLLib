@@ -24,7 +24,8 @@ class clientFedSGD(Client):
         # FedAvg epochs, FedSGD must not discard an entire client merely
         # because its local dataset is smaller than that upper bound: with
         # drop_last=False the first (and only) batch contains all local data.
-        trainloader = self.load_train_data(drop_last=False)
+        trainloader = self.load_train_data(
+            drop_last=False, apply_backdoor=self.backdoor.spec.name != "a3fl")
         try:
             x, y = next(iter(trainloader))
         except StopIteration as error:
@@ -33,6 +34,7 @@ class clientFedSGD(Client):
                 "or exclude empty clients from this experiment.") from error
 
         self.model.train()
+        self.backdoor.before_local_train(self.model)
         start_time = time.time()
         if type(x) == type([]):
             x[0] = x[0].to(self.device)
@@ -40,9 +42,11 @@ class clientFedSGD(Client):
             x = x.to(self.device)
         y = y.to(self.device)
 
+        x, y = self.backdoor.before_batch(self.model, x, y)
         self.model.zero_grad(set_to_none=True)
         loss = self.loss(self.model(x), y)
         loss.backward()
+        self.backdoor.mask_gradients(self.model)
 
         # The server interprets model - global_model as the uploaded gradient.
         # Do not call the inherited local SGD optimizer here: FedSGD applies the

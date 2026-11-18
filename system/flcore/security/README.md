@@ -1,29 +1,5 @@
 # `flcore/security` 攻防实现说明
 
-## DFLlib 新增攻防入口
-
-完整机制、默认值、信息边界及可执行对照命令见
-[`scalar-security-port.md`](../../../docs/scalar-security-port.md)。
-
-- `-atk poisonedfl -pfs 8 -pfw 10`：只使用全局模型历史的基础共享载荷攻击。
-  FedAvg提交模型差分；FedSGD/SGD使用`-pfgm sgd_delta`；
-  FedSGD/Adam显式使用`-pfgm adam_proxy`，这是梯度代理，不是Adam精确逆换算。
-- `-atk minmax -amv cosine_oracle -acq .5`：使用恶意干净代理的模型/全局余弦
-  分位数约束，替换原L2可行性约束；不读良性更新或聚类决策。
-  `-amv cosine`为保留L2上界的版本，默认`agnostic`仍走既有实现。
-- `-def scalar_kmeans`：对`cos(P_i,W)`二聚类，保留人数多数簇，平局取高余弦簇。
-- `-def scalar_dbscan`：相同阶段一后，仅在主簇内用`||P_i||`和`cos(P_i,W)`
-  检查紧密DBSCAN子簇及客户端/伙伴历史。后端不接收向量、数据、真恶意标签或比例。
-- `-nc 20 -amr .2 -aseed 0`：总20人中4恶意16良性，不追加客户端。
-- `-defstart 5`前不实际剔除，双标量方法仍收集主簇合格历史；全拒绝时保持全局
-  模型，且不推进Adam状态。
-- `-sclog`打印排序的每客户端模型L2/余弦；聚类和两阶段剔除写入实验目录
-  `security/runN/submitted_scalars.jsonl`；攻击参数写入`attack_trace.jsonl`。
-
-现有`cosine_cluster`及监控余弦参照加权平均**更新**；新方法参照轮次开始的
-**全局模型**。FedSGD的提交P为原有`W+g`载体。新旧指标不混用，亦不将新组合
-称为FLAME原样复现。原有方法说明保留如下。
-
 本目录是项目所有投毒、鲁棒聚合与审计逻辑的唯一入口说明。每次新增或改变 `attack/`、`defense/`、`monitor/` 的行为时，应同步更新本文件；日志中的真恶意标签只用于离线审计，任何防御实现均不得读取它。
 
 ## 统一数据流
@@ -38,12 +14,44 @@
 | `label_flip` | 恶意 MNIST 客户端训练时翻转标签。 | 数据投毒；不是任意更新攻击。 |
 | `free_rider` | 将恶意上传参数替换为高斯噪声。 | 显式异常基线，通常不隐蔽。 |
 | `minmax` | 用恶意客户端本地干净更新做代理，搜索共享更新，使其到任一代理的最大平方距离受代理两两最大距离约束。 | SH21 AGR-agnostic 风格；不知服务器 AGR，也不直接约束余弦/L∞。 |
-| `minsum` | 同上，但约束到所有代理的平方距离和。 | 本实现遵循公开代码使用最中心代理的 `min` 参考项。 |
+| `minsum` | 同上，但约束到所有代理的平方距离和。 | 当前保留已有实验的 `max` 参考项，即代理距离平方和的最大值。 |
 | `fang` | 以全部本轮良性上传为参考，用反符号方向搜索仍会被 Krum 选中的最大共享更新。 | **oracle/AGR-tailored Fang-Krum**：攻击者可见良性更新且知道 Krum 参数；不能称为 agnostic。 |
 
 `minmax` 与 `minsum` 都令当轮全部恶意上传为同一个优化更新；这是 SH21 C 节式 (6)、式 (7) 的共同设定。`fang` 当前只实现 Krum 目标，使用 `-fmar` 指定攻击者已知的 Krum Byzantine 预算。
 
 常用攻击参数：`-amr` 恶意客户端比例，`-aseed` 恶意 ID 种子，`-adev {unit_vec,sign,std}`，`-alinit`、`-atol`、`-amaxsteps` 搜索参数，`-fmar` Fang-Krum 的已知预算。
+
+### 已对齐的更新攻击
+
+两个子库均提供 `-atk poisonedfl` 和 `-atk minmax -amv {agnostic,cosine,cosine_oracle}`。
+PoisonedFL 读取全局模型历史，恶意客户端跳过私有训练。默认反馈窗口为 10，可用 `-pfw 50` 选择原实验窗口。FedSGD/SGD 使用 `-pfgm sgd_delta`，FedSGD/Adam 使用 `-pfgm adam_proxy`，后者采用梯度代理映射。
+
+余弦 Min-Max 的 `cosine` 模式保留原 L2 搜索上界，`cosine_oracle` 使用带符号的模型余弦可行性约束。两者均用活跃恶意客户端的干净更新作代理。目标由 `-act` 指定或由 `-acq` 的代理余弦分位数确定，`-acs` 控制搜索分辨率。
+
+### 图像后门
+
+所有图像后门通过 `-bd` / `--backdoor` 选择，训练路径为 FedAvg/FedSGD。`-amr` 和 `-aseed` 控制固定恶意客户端集合。训练数据投毒和触发测试指标共用触发器定义。
+
+| `--backdoor` | 当前实现 |
+|---|---|
+| `badnets` | 角落方块触发器，非目标类别改标到目标类别。 |
+| `blended` | 混合固定种子生成的随机图案。 |
+| `refool` / `reflect` | 保持标签的镜像混合近似。精确 Refool 的外部反射图像库尚未接入。 |
+| `clean_label` / `label_consistent` | 在目标类加入触发器并保留标签的轻量基线。 |
+| `dba` | 按恶意客户端 ID 分配触发器条带，测试时应用完整联合触发器。 |
+| `neurotoxin` | 在基础触发器上，屏蔽上次全局更新活跃坐标的梯度。 |
+| `f3ba` | 按现有重要度代理选择参数做符号翻转。 |
+| `a3fl` | 用当前模型和影子模型优化触发器的轻量实现。 |
+
+`--backdoor_base` 为后三种方法选择基础触发器。Refool、Clean-label、F3BA 和 A3FL 沿用项目现有近似或简化实现。迁移验证覆盖训练钩子、数据政策和上传协议，正式性能复现需要另行按论文设置评估。
+
+常用配置为 `--backdoor_target_label`、`--backdoor_source_label`、`--backdoor_poison_ratio`、`--backdoor_patch_size`、`--backdoor_patch_location` 和 `--backdoor_seed`。`--backdoor_source_label -1` 对所有非目标类别统计 ASR。`--backdoor_start_round` / `--backdoor_end_round` 包含端点，`-1` 表示训练结束，比例为 0 时不投毒。
+
+运行 `python -m tools.evaluate_backdoor_model --help` 查看离线评估。输出中的 `clean_accuracy` 使用完整测试集，`source_accuracy` 使用符合源类条件的干净样本，ASR 使用对应触发样本。
+
+A3FL 自动把学习到的触发器与配置保存到模型旁的 `*_backdoor.pt`。离线评估使用 `--trigger-state` 读取这个文件。当多个恶意客户端学习不同图案时，ASR 对图像与触发器的所有组合计数，等权汇总各图案。
+
+两个库的功能与验证范围见 [对齐记录](../../../docs/security-alignment.md)。
 
 ## 攻击参数手册（默认值与命令）
 
@@ -139,12 +147,49 @@ python main.py -algo FedSGD -fopt adam -flr 0.001 -data MNIST_100 -m FedAvgMLP \
 | `median` | 每一坐标取中位数。 | 使用 `-rmar` 统一记录预算；不依赖客户端整体筛除。 |
 | `cosine_cluster` | 对 `cos(u_i, sum_j w_j u_j)` 做一维二均值聚类；可按余弦均值或簇大小选择保留簇。 | AFA-style 基线，不是 AFA 的精确复现；`-ccselect {high_mean,largest_cluster}`、`-cciter`、`-cctol`。 |
 | `dnc` | 随机抽坐标、中心化、SVD；删除首右奇异向量投影平方最大的更新。实现直接从参数张量 gather 抽样坐标，不先构造完整客户端更新矩阵。 | `-dmar`、`-df`、`-di`、`-db`、`-dseed`。 |
+| `proto-clean` | 用服务器持有的少量带标签干净数据，比较候选模型与全局模型的类均值特征和输出语义。 | 这是需要类别数据的对照基线，不是通用触发器检测器。 |
+| `proto-probe` | 从随机噪声开始，用全局模型最后一层的权重作为类别方向，把无标签输入推到各类别边界附近；所有候选模型测试同一批输入，并记录“某一类别吸引力是否异常集中”的分数。 | 不读取标签、客户端数据或真恶意 ID；当前是 **keep-all 诊断模式**，只写 `defense_score`，不屏蔽客户端。要求 `BaseHeadSplit` 且 `head` 为线性层；用 `-defstart` 做模型 warm-up，参数为 `-pp_n/-pp_steps/-pp_lr/-pp_margin`。 |
+| `scalar_kmeans` | 以提交模型相对全局模型的余弦做二聚类，保留多数簇。 | FedAvg/FedSGD。 |
+| `scalar_dbscan` | 在多数簇内结合提交模型范数、余弦和跨轮历史确认紧密子簇。 | FedAvg/FedSGD。预热阶段收集历史，全拒绝时保留全局模型和优化器状态。 |
 
 `-rmar` 是 Krum/Multi-Krum/Bulyan/Trimmed Mean/Median 的公开防御预算；`-dmar` 是 DnC 的独立预算。两者均不是攻击真值 `-amr`。实验若使其相等，需标注为 oracle-budget ablation。
 
 所有 `-def` 共用 `-defstart` / `--defense_start_round`（默认 `0`）：仅当通信轮编号 `round >= defstart` 时，服务器才调用所选防御。设为 `50` 表示第 0--49 轮按普通聚合运行、第 50 轮起开始防御；warm-up 期间监控仍记录上传与 audit，但 defense 字段为 `none`。该参数不改变攻击开始时刻，攻击仍从第 0 轮起按配置执行。
 
 DnC 的 `-db` 是每次 SVD 的随机坐标数，不是完整模型维度。对 100 客户端 ResNet18/VGG11，建议先保持 `-db 10000 -di 1`；增大 `-db` 会增加 SVD 时间与 CPU 内存。当前实现不会再先展平全部客户端模型更新，但 `-db` 过大仍会使 SVD 本身变慢。
+
+`proto-probe` 的第一阶段只检验一个假设：后门客户端是否会让边界探针一致地更靠近某个未知目标类。监控 CSV 中的真恶意标签只在训练后计算区分度，不参与探针生成和分数计算。若分数没有稳定区分良性/恶意客户端，应判定这版假设失败，而不是直接加阈值筛人。
+
+### PGBD 后处理修复
+
+可通过 `--triggered-reference-npz` 读取预先准备的有标签参考集，供 ST-PGBD 构建原型。
+
+PGBD 不是本项目的轮级客户端筛选器，而是对一个已经训练好的投毒模型做后处理修复。当前适配保留论文的核心步骤：在指定中间层计算每类 clean activation prototype，构造目标类别的 prototype activation vector（PAV），再用“样本真实类别 logit 对激活的梯度与 PAV 的绝对余弦”作为 sanitization loss，并加 clean cross-entropy 保持正常分类。
+
+实现位置：`flcore/security/defense/pgbd_repair.py`；命令入口：`tools/run_pgbd_repair.py`。它要求服务器拥有少量**带标签的干净参考数据**，且每个类别至少一个样本。官方 PGBD 的 DINO/概念映射和攻击专用评估没有直接搬入，因为本实验首先验证 activation-space 修复是否能降低现有 PFLlib 后门模型的 ASR。
+
+模拟器中可以先从 held-out 分区制作参考集（生产环境不要把客户端测试集当作服务器数据）：
+
+```bash
+python -m tools.make_pgbd_reference --dataset MNIST_100 --clients 5 --classes 10 \
+  --samples-per-class 10 --output ../results/pgbd_clean_reference.npz
+```
+
+训练并保存投毒全局模型后，执行后处理修复：
+
+```bash
+python -m tools.run_pgbd_repair \
+  --model ../results/<run>/models/MNIST_100_FedAvg_server_run0.pt \
+  --reference-npz ../results/pgbd_clean_reference.npz \
+  --output ../results/<run>/models/MNIST_100_FedAvg_server_run0_pgbd.pt \
+  --classes 10 --layer fc1 --target-label 0 --epochs 3 \
+  --batch-size 32 --lr 0.001 --pav-weight 1.0 \
+  --clean-loss-weight 1.0 --device cuda
+```
+
+修复前后的 ASR/clean accuracy 必须使用同一份测试集和同一个触发器分别评估；不能只看脚本输出的 clean reference accuracy。`--layer` 应明确写出，例如 FedAvgMLP 保存为 `BaseHeadSplit` 时实际层名是 `base.fc1`（也兼容写成 `fc1`），FedAvgCNN 通常使用 `base.fc1.0` 或实际模型的 penultimate feature layer。完整说明见 `flcore/security/defense/pgbd_repair.py`。
+
+若实验允许服务器知道触发器形式，可加 `--trigger-backdoor badnets`（以及对应 patch/blend 参数），脚本会用同一批 clean reference 生成 triggered prototypes，走更接近论文 ST-PGBD 的 `clean_proto - triggered_proto` PAV；不加该参数则是只用 clean prototype 的 target-directed fallback。两种设置必须分开报告，不能把触发器先验版本称为 data-free PGBD。
 
 ## 命令示例
 

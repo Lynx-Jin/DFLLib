@@ -1,5 +1,8 @@
 # Scalar security port validation
 
+Updated on 2026-11-18. The previous legacy Min-Sum and monitor test mismatches are resolved. Min-Sum retains the existing maximum-reference behavior, and the monitor test uses the weighted-mean update reference. See the [current alignment record](security-alignment.md).
+
+
 Validated on 2026-11-05 against base revision `5541c85`. These are migration
 checks, not evidence of broad attack effectiveness or defense accuracy.
 

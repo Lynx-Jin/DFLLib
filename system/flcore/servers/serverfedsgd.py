@@ -42,9 +42,10 @@ class FedSGD(Server):
 
     def aggregate_parameters(self):
         """Apply the chosen server optimizer to the weighted mean gradient."""
-        if getattr(self, 'skip_aggregation', False):
+        if getattr(self, "skip_aggregation", False):
             return
         assert len(self.uploaded_models) > 0
+        self.previous_global_state = self._snapshot_global_state()
         self.server_optimizer.zero_grad(set_to_none=True)
         with torch.no_grad():
             for global_parameter in self.global_model.parameters():

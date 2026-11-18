@@ -1,33 +1,62 @@
-# DFLlib
+<div align="center">
 
-A detection-oriented federated learning library built on [PFLlib](https://github.com/TsingZ0/PFLlib).
+# 🛡️ DFLLib
 
-## Attacks
+**A federated learning framework for attack and defense research**
 
-| Attack | Original paper / source | Venue |
-|---|---|---|
-| PoisonedFL | [Model Poisoning Attacks to Federated Learning via Multi-Round Consistency][poisonedfl] | **CVPR 2025** |
-| Min-Max | [Manipulating the Byzantine: Optimizing Model Poisoning Attacks and Defenses for Federated Learning][minmax] | **NDSS 2021** |
-| Min-Sum | [Same paper as Min-Max][minmax] | **NDSS 2021** |
-| Cosine-Tailored Min-Max | Project adaptation of [Min-Max][minmax] | — |
-| Fang (Krum-targeted) | [Local Model Poisoning Attacks to Byzantine-Robust Federated Learning][fang] | **USENIX Security 2020** |
-| Label Flipping | Baseline | — |
-| Gaussian Free-Rider | Baseline | — |
+[Implementation guide](system/flcore/security/README.md) · [Integration and validation](docs/security-alignment.md) · [License](LICENSE)
 
-The cosine-tailored Min-Max and Adam-proxy PoisonedFL variants are project adaptations of the cited methods.
+</div>
 
-## Defenses
+Built on [PFLlib](https://github.com/TsingZ0/PFLlib), with integrated poisoning attacks, image backdoors, robust aggregation, and model repair. Security experiments support **FedAvg** and **FedSGD** with server-side SGD or Adam.
 
-- Krum
-- Multi-Krum
-- Bulyan
-- Trimmed Mean
-- Coordinate-wise Median
-- Divide-and-Conquer (DnC)
-- Cosine Clustering (AFA-style baseline)
-- KMeans (majority-cluster selection)
-- KMeans + DBSCAN (with historical consistency)
+## 🧪 Poisoning attacks
 
-[poisonedfl]: https://openaccess.thecvf.com/content/CVPR2025/html/Xie_Model_Poisoning_Attacks_to_Federated_Learning_via_Multi-Round_Consistency_CVPR_2025_paper.html
-[minmax]: https://www.ndss-symposium.org/wp-content/uploads/ndss2021_6C-3_24498_paper.pdf
-[fang]: https://www.usenix.org/conference/usenixsecurity20/presentation/fang
+| Method | Option |
+|---|---|
+| Label Flipping | `-atk label_flip` |
+| Gaussian Free-Rider | `-atk free_rider` |
+| Min-Max | `-atk minmax` |
+| Min-Sum | `-atk minsum` |
+| Cosine-constrained Min-Max | `-atk minmax -amv cosine` |
+| Cosine-feasibility Min-Max | `-atk minmax -amv cosine_oracle` |
+| Fang-Krum | `-atk fang` |
+| PoisonedFL | `-atk poisonedfl` |
+
+## 🎯 Image backdoors
+
+| Method | Option |
+|---|---|
+| BadNets | `-bd badnets` |
+| Blended | `-bd blended` |
+| Refool-style Reflection | `-bd refool` |
+| Clean-label | `-bd clean_label` |
+| Distributed Backdoor Attack (DBA) | `-bd dba` |
+| Neurotoxin | `-bd neurotoxin` |
+| A3FL | `-bd a3fl` |
+| F3BA | `-bd f3ba` |
+
+`reflect` aliases `refool`, and `label_consistent` aliases `clean_label`. Refool, Clean-label, A3FL, and F3BA use lightweight project adaptations. Cosine-based Min-Max and the PoisonedFL Adam adapter follow the project-specific implementations documented in the guide.
+
+## 🧱 Defenses and model repair
+
+| Method | Option or tool |
+|---|---|
+| Krum | `-def krum` |
+| Multi-Krum | `-def multikrum` |
+| Bulyan | `-def bulyan` |
+| Trimmed Mean | `-def trimmedmean` |
+| Coordinate-wise Median | `-def median` |
+| Divide-and-Conquer (DnC) | `-def dnc` |
+| AFA-style Cosine Clustering | `-def cosine_cluster` |
+| Scalar KMeans | `-def scalar_kmeans` |
+| Scalar KMeans + DBSCAN | `-def scalar_dbscan` |
+| Clean-reference Prototype Screening | `-def proto-clean` |
+| Prototype Probes · diagnostic scoring | `-def proto-probe` |
+| PGBD · post-training model repair | `python -m tools.run_pgbd_repair` |
+
+Prototype Probes score all clients and retain every upload. PGBD uses labeled clean reference samples. Detailed assumptions, parameters, and evaluation tools are covered in the [implementation guide](system/flcore/security/README.md).
+
+## 📚 Attribution
+
+DFLLib builds on [PFLlib](https://github.com/TsingZ0/PFLlib) under the Apache-2.0 license. Please retain upstream attribution when using or extending the framework.

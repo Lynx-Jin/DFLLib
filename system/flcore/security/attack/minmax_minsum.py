@@ -81,10 +81,9 @@ class MinMaxMinSumAttack:
         distances = torch.cdist(proxy_updates, proxy_updates, p=2).square()
         if self.attack == "minmax":
             return distances.max()
-        # The released implementation uses min. The paper's displayed Eq. (7)
-        # prints max, but min makes the malicious update at least as central as
-        # the most central proxy update and matches the public attack code.
-        return distances.sum(dim=1).max()#改成max试一试
+        # Preserve this project's existing maximum-reference experiment.
+        # Its threshold is the largest proxy sum of squared distances.
+        return distances.sum(dim=1).max()
 
     def _score(self, candidate, proxy_updates):
         distances = torch.norm(

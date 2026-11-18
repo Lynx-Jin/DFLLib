@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 import copy
 import torch
 import argparse
@@ -35,7 +35,6 @@ from flcore.servers.servergen import FedGen
 from flcore.servers.serverscaffold import SCAFFOLD
 from flcore.servers.serverfd import FD
 from flcore.servers.serverala import FedALA
-from flcore.servers.serverpac import FedPAC
 from flcore.servers.serverlg import LG_FedAvg
 from flcore.servers.servergc import FedGC
 from flcore.servers.serverfml import FML
@@ -89,10 +88,57 @@ def _resolve_image_channels(args):
     return 1 if "mnist" in args.dataset.lower() else 3
 
 
+def _split_classifier_head(model):
+    """Return a BaseHeadSplit without assuming a classifier is named ``fc``.
+
+    PFLlib's CNN/ResNet models use ``fc``, while FedAvgMLP uses ``fc2``.
+    FedAvg/FedSGD split the final classifier so the server-side prototype
+    defenses can access the penultimate representation consistently.
+    """
+    for attribute in ("fc", "fc2"):
+        head = getattr(model, attribute, None)
+        if isinstance(head, nn.Module):
+            setattr(model, attribute, nn.Identity())
+            return BaseHeadSplit(model, copy.deepcopy(head))
+    raise AttributeError(
+        f"Cannot split classifier head for {model.__class__.__name__}; "
+        "expected a final module named 'fc' or 'fc2'.")
+
+
 def validate_security_options(args):
     """Validate new attack/defense contracts before creating experiment outputs."""
-    if args.attack_type.lower().replace('-', '').replace('_', '') == 'poisonedfl':
-        args.attack_type = 'poisonedfl'
+    attack_names = {
+        "none": "none", "labelflip": "label_flip", "freerider": "free_rider",
+        "minmax": "minmax", "minsum": "minsum", "fang": "fang", "poisonedfl": "poisonedfl",
+    }
+    attack_key = args.attack_type.lower().replace("-", "").replace("_", "")
+    if attack_key not in attack_names:
+        raise ValueError(f"Unknown attack type: {args.attack_type}")
+    args.attack_type = attack_names[attack_key]
+    if not 0 <= args.attack_malicious_ratio <= 1 or args.attack_seed < 0:
+        raise ValueError("Require malicious ratio in [0, 1] and a nonnegative attack seed")
+    if args.backdoor != "none":
+        if args.algorithm not in ("FedAvg", "FedSGD"):
+            raise ValueError("Image-backdoor round and update hooks currently support FedAvg and FedSGD")
+        if args.attack_type == "poisonedfl":
+            raise ValueError("PoisonedFL skips local training, which image backdoors require")
+        if not 0 <= args.backdoor_target_label < args.num_classes:
+            raise ValueError("Backdoor target label must be within the configured classes")
+        if not -1 <= args.backdoor_source_label < args.num_classes:
+            raise ValueError("Backdoor source label must be -1 or a configured class")
+        if not 0 <= args.backdoor_poison_ratio <= 1 or not 0 <= args.backdoor_blend_alpha <= 1:
+            raise ValueError("Backdoor poison ratio and blend alpha must lie in [0, 1]")
+        if args.backdoor_patch_size < 1 or args.backdoor_dba_fragments < 1:
+            raise ValueError("Backdoor patch size and fragment count must be positive")
+        if (args.backdoor_start_round < 0 or args.backdoor_end_round < -1
+                or 0 <= args.backdoor_end_round < args.backdoor_start_round):
+            raise ValueError("Backdoor schedule requires start >= 0 and end >= start, or end = -1")
+        if (not 0 <= args.backdoor_neurotoxin_mask_ratio <= 1
+                or not 0 <= args.backdoor_f3ba_flip_ratio <= 1):
+            raise ValueError("Backdoor coordinate ratios must lie in [0, 1]")
+        if (not math.isfinite(args.backdoor_a3fl_step_size) or args.backdoor_a3fl_step_size <= 0
+                or args.backdoor_a3fl_shadow_steps < 1):
+            raise ValueError("A3FL step size and shadow steps must be positive")
     if args.attack_minmax_variant != 'agnostic' and args.attack_type != 'minmax':
         raise ValueError('Cosine-tailored variants require -atk minmax')
     if args.attack_cosine_target is not None and not -1 <= args.attack_cosine_target <= 1:
@@ -276,9 +322,8 @@ def run(args):
 
         # select algorithm
         if args.algorithm in {"FedAvg", "FedSGD"}:
-            args.head = copy.deepcopy(args.model.fc)
-            args.model.fc = nn.Identity()
-            args.model = BaseHeadSplit(args.model, args.head)
+            args.model = _split_classifier_head(args.model)
+            args.head = args.model.head
             server = FedAvg(args, i) if args.algorithm == "FedAvg" else FedSGD(args, i)
 
         elif args.algorithm == "Local":
@@ -375,6 +420,8 @@ def run(args):
             server = FedALA(args, i)
 
         elif args.algorithm == "FedPAC":
+            from flcore.servers.serverpac import FedPAC
+
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
@@ -652,11 +699,54 @@ if __name__ == "__main__":
     parser.add_argument('-amoneps', "--attack_monitor_l0_epsilon", type=float, default=0.0,
                         help="Count update coordinates above this magnitude for L0")
 
+    # Client-side image backdoors.  These are intentionally independent from
+    # -atk: `-atk` reproduces legacy server-side Byzantine-update simulations,
+    # while --backdoor controls data/objective/update behavior on compromised
+    # clients.  Neurotoxin/F3BA/A3FL decorate --backdoor_base.
+    parser.add_argument('-bd', '--backdoor', type=str, default='none',
+                        choices=['none', 'badnets', 'blended', 'refool', 'reflect',
+                                 'clean_label', 'label_consistent', 'dba',
+                                 'neurotoxin', 'a3fl', 'f3ba'],
+                        help='Client-side image backdoor; separate from -atk Byzantine updates')
+    parser.add_argument('--backdoor_base', type=str, default='badnets',
+                        choices=['badnets', 'blended', 'refool', 'clean_label', 'dba'],
+                        help='Trigger/data attack decorated by neurotoxin, a3fl, or f3ba')
+    parser.add_argument('--backdoor_target_label', type=int, default=0,
+                        help='Target label for triggered-ASR evaluation')
+    parser.add_argument('--backdoor_source_label', type=int, default=-1,
+                        help='Source label; -1 means all non-target test inputs')
+    parser.add_argument('--backdoor_poison_ratio', type=float, default=0.25,
+                        help='Fraction of eligible examples poisoned on an active malicious client')
+    parser.add_argument('--backdoor_start_round', type=int, default=0,
+                        help='First active communication round for the backdoor')
+    parser.add_argument('--backdoor_end_round', type=int, default=-1,
+                        help='Last active communication round; -1 means through training')
+    parser.add_argument('--backdoor_patch_size', type=int, default=5,
+                        help='Square trigger side length in pixels')
+    parser.add_argument('--backdoor_patch_location', type=str, default='upper_left',
+                        choices=['upper_left', 'upper_right', 'lower_left', 'lower_right'],
+                        help='Patch trigger placement')
+    parser.add_argument('--backdoor_blend_alpha', type=float, default=0.2,
+                        help='Blend/reflection trigger opacity')
+    parser.add_argument('--backdoor_dba_fragments', type=int, default=4,
+                        help='Number of DBA trigger fragments shared across colluders')
+    parser.add_argument('--backdoor_seed', type=int, default=0,
+                        help='Seed for poison sampling and synthetic patterns')
+    parser.add_argument('--backdoor_neurotoxin_mask_ratio', type=float, default=0.05,
+                        help='Fraction of recently active coordinates masked by Neurotoxin')
+    parser.add_argument('--backdoor_f3ba_flip_ratio', type=float, default=0.01,
+                        help='Lowest-importance parameter fraction sign-flipped by F3BA')
+    parser.add_argument('--backdoor_a3fl_step_size', type=float, default=0.01,
+                        help='PGD/shadow step size for the compact A3FL reproduction')
+    parser.add_argument('--backdoor_a3fl_shadow_steps', type=int, default=1,
+                        help='Shadow unlearning steps per A3FL local batch')
+
     # Robust aggregation defenses. DnC is SH21 Algorithm 2; cosine_cluster is
     # an AFA-style cosine baseline, not a claim of an exact AFA reproduction.
     parser.add_argument('-def', "--defense_type", type=str, default="none",
                         choices=["none", "dnc", "cosine_cluster", "krum", "multikrum",
-                                 "bulyan", "trimmedmean", "median", "scalar_kmeans", "scalar_dbscan"],
+                                 "bulyan", "trimmedmean", "median", "scalar_kmeans", "scalar_dbscan",
+                                  "proto-clean", "proto-probe"],
                         help="Robust aggregation; scalar_* use submitted-model/global features")
     parser.add_argument('-defstart', "--defense_start_round", type=int, default=0,
                         help="Start applying the selected defense at this communication round; 0 means immediately")
@@ -695,6 +785,39 @@ if __name__ == "__main__":
     parser.add_argument('-sclog', '--scalar_verbose', action='store_true',
                         help='Print one submitted-model cosine/norm per client, sorted by cosine')
 
+
+    # ProtoClean: server-side clean-reference functional-prototype screen.
+    parser.add_argument('-pc_ref', "--proto_clean_reference_path", type=str, default="",
+                        help="Server clean IID .npz (x/y or data{x,y}); empty uses simulation test-partition fallback")
+    parser.add_argument('-pc_spc', "--proto_clean_samples_per_class", type=int, default=10,
+                        help="Maximum clean reference examples retained per class")
+    parser.add_argument('-pc_bs', "--proto_clean_batch_size", type=int, default=64,
+                        help="Server batch size for ProtoClean candidate evaluation")
+    parser.add_argument('-pc_thr', "--proto_clean_threshold", type=float, default=3.5,
+                        help="Robust-z threshold for rejecting a ProtoClean prototype outlier")
+    parser.add_argument('-pc_mar', "--proto_clean_assumed_malicious_ratio", type=float, default=0.2,
+                        help="Maximum ProtoClean removal budget as an assumed malicious fraction")
+    parser.add_argument('-pc_pw', "--proto_clean_prototype_weight", type=float, default=1.0,
+                        help="Weight on class-prototype displacement")
+    parser.add_argument('-pc_lw', "--proto_clean_logit_weight", type=float, default=0.25,
+                        help="Weight on clean output semantic displacement")
+    parser.add_argument('-pc_seed', "--proto_clean_seed", type=int, default=0,
+                        help="Seed for clean-reference stratified sampling")
+    # ProtoProbe: label-free hypothesis test. It records a score but keeps all clients.
+    parser.add_argument('-pp_n', "--proto_probe_seeds_per_class", type=int, default=4,
+                        help="Random unlabelled seeds reused for each class direction")
+    parser.add_argument('-pp_steps', "--proto_probe_steps", type=int, default=10,
+                        help="Input-optimization steps for prototype-boundary probes")
+    parser.add_argument('-pp_lr', "--proto_probe_step_size", type=float, default=0.1,
+                        help="Normalized input step size for prototype-boundary probes")
+    parser.add_argument('-pp_margin', "--proto_probe_boundary_margin", type=float, default=0.1,
+                        help="Distance kept just outside each target prototype region")
+    parser.add_argument('-pp_min', "--proto_probe_input_min", type=float, default=-1.0,
+                        help="Lower input bound; project image datasets are normalized to -1")
+    parser.add_argument('-pp_max', "--proto_probe_input_max", type=float, default=1.0,
+                        help="Upper input bound; project image datasets are normalized to 1")
+    parser.add_argument('-pp_seed', "--proto_probe_seed", type=int, default=0,
+                        help="Round-deterministic random probe seed")
 
     args = parser.parse_args()
     try:

@@ -4,6 +4,33 @@
 /system/items/
 /system/models/
 
+# Experiment output directories at any depth.
+results/
+logs/
+logger/
+parallel_logs/
+attack_monitor/
+checkpoints/
+
+# Generated logs, metrics, arrays and serialized models.
+*.log
+*.out
+*.err
+*.csv
+*.jsonl
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.npz
+*.npy
+*.pkl
+*.pickle
+terminal_output.txt
+
 # Generated client datasets.  Keep the top-level generator scripts and
 # dataset/utils source code so a clone can regenerate these files locally.
 /dataset/*/

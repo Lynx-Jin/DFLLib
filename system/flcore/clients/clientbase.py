@@ -8,6 +8,7 @@ from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
 from utils.label_flip import LabelFlipWrapper, get_label_flip_mapping
+from flcore.security.backdoor import build_backdoor_attack
 
 
 class Client(object):
@@ -33,6 +34,11 @@ class Client(object):
         self.few_shot = args.few_shot
         self.attack_type = getattr(args, 'attack_type', 'none')
         self.is_malicious = kwargs.get('is_malicious', False)
+        # Keep backdoors separate from ``attack_type``.  The latter is the
+        # legacy server-side Byzantine-update simulator; a backdoor is what a
+        # compromised client actually trains on.
+        self.backdoor = build_backdoor_attack(args, client_id=id,
+                                              is_malicious=self.is_malicious)
 
 
         # check BatchNorm
@@ -56,7 +62,7 @@ class Client(object):
         self.learning_rate_decay = args.learning_rate_decay
 
 
-    def load_train_data(self, batch_size=None, drop_last=None):
+    def load_train_data(self, batch_size=None, drop_last=None, apply_backdoor=True):
         """Build a training loader.
 
         Ordinary local-epoch algorithms keep the historical ``drop_last``
@@ -72,7 +78,17 @@ class Client(object):
         if (self.is_malicious and self.attack_type == 'label_flip'
                 and self.dataset.upper().startswith('MNIST')):
             train_data = LabelFlipWrapper(train_data, self.dataset, self.attack_type)
+        if apply_backdoor:
+            train_data = self.backdoor.training_dataset(train_data)
         return DataLoader(train_data, batch_size, drop_last=drop_last, shuffle=True)
+
+    def configure_backdoor_coalition(self, malicious_ids):
+        """Give DBA clients a stable coalition/fragment assignment."""
+        self.backdoor.configure_coalition(malicious_ids)
+
+    def begin_attack_round(self, round_id, previous_global_state=None):
+        """Synchronize round-dependent attack state after model broadcast."""
+        self.backdoor.begin_round(round_id, previous_global_state)
 
 
     def load_test_data(self, batch_size=None):
