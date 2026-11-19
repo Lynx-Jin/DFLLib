@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import math
+import numpy as np
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence, Set
 
@@ -50,6 +51,8 @@ class BackdoorSpec:
     f3ba_flip_ratio: float
     a3fl_step_size: float
     a3fl_shadow_steps: int
+    preset: str = "legacy"
+    patch_margin: int = 0
 
 
 def _normalise_name(name: str) -> str:
@@ -60,6 +63,32 @@ def _normalise_name(name: str) -> str:
         "labelconsistent": "clean_label", "focused_flip": "f3ba",
     }
     return aliases.get(name, name)
+
+
+
+def backdoor_defaults(args):
+    """Resolve the canonical BadNets recipe; keep other attacks unchanged."""
+    name = _normalise_name(getattr(args, 'backdoor', 'none'))
+    requested = getattr(args, 'backdoor_preset', 'reference')
+    if requested not in {'reference', 'legacy'}:
+        raise ValueError('backdoor_preset must be reference or legacy')
+    preset = requested if name == 'badnets' else 'legacy'
+    reference = preset == 'reference'
+    defaults = {
+        'backdoor_preset': preset,
+        'backdoor_poison_ratio': 0.2 if reference else 0.25,
+        'backdoor_patch_size': 4 if reference else 5,
+        'backdoor_patch_location': 'lower_right' if reference else 'upper_left',
+        'backdoor_patch_margin': 1 if reference else 0,
+    }
+    return {key: (default if getattr(args, key, None) is None else getattr(args, key))
+            for key, default in defaults.items() if key != 'backdoor_preset'} | {
+                'backdoor_preset': preset}
+
+
+def resolve_backdoor_defaults(args):
+    for key, value in backdoor_defaults(args).items():
+        setattr(args, key, value)
 
 
 def build_backdoor_attack(args, client_id: Optional[int], is_malicious: bool,
@@ -73,16 +102,17 @@ def build_backdoor_attack(args, client_id: Optional[int], is_malicious: bool,
         base_name = name
     if base_name not in DATA_ATTACKS:
         raise ValueError("backdoor_base must be one of: " + ", ".join(sorted(DATA_ATTACKS)))
+    resolved = backdoor_defaults(args)
     spec = BackdoorSpec(
         name=name,
         base_name=base_name,
         target_label=int(getattr(args, "backdoor_target_label", 0)),
         source_label=int(getattr(args, "backdoor_source_label", -1)),
-        poison_ratio=float(getattr(args, "backdoor_poison_ratio", 0.25)),
+        poison_ratio=float(resolved["backdoor_poison_ratio"]),
         start_round=int(getattr(args, "backdoor_start_round", 0)),
         end_round=int(getattr(args, "backdoor_end_round", -1)),
-        patch_size=int(getattr(args, "backdoor_patch_size", 5)),
-        patch_location=str(getattr(args, "backdoor_patch_location", "upper_left")),
+        patch_size=int(resolved["backdoor_patch_size"]),
+        patch_location=str(resolved["backdoor_patch_location"]),
         blend_alpha=float(getattr(args, "backdoor_blend_alpha", 0.2)),
         dba_fragments=int(getattr(args, "backdoor_dba_fragments", 4)),
         seed=int(getattr(args, "backdoor_seed", 0)),
@@ -90,6 +120,8 @@ def build_backdoor_attack(args, client_id: Optional[int], is_malicious: bool,
         f3ba_flip_ratio=float(getattr(args, "backdoor_f3ba_flip_ratio", 0.01)),
         a3fl_step_size=float(getattr(args, "backdoor_a3fl_step_size", 0.01)),
         a3fl_shadow_steps=int(getattr(args, "backdoor_a3fl_shadow_steps", 1)),
+        preset=resolved["backdoor_preset"],
+        patch_margin=int(resolved["backdoor_patch_margin"]),
     )
     return BackdoorAttack(spec, client_id=client_id, is_malicious=is_malicious,
                           evaluation=evaluation)
@@ -181,6 +213,15 @@ class BackdoorAttack:
                 eligible.append(index)
         if not eligible or self.spec.poison_ratio <= 0:
             return set()
+        if self.spec.name == 'badnets' and self.spec.preset == 'reference':
+            # Exact reference semantics: count against all local records, but
+            # choose only non-target records; fixed RandomState per client.
+            count = min(len(eligible), int(round(self.spec.poison_ratio * len(dataset))))
+            if count == 0:
+                count = 1
+            client_seed = -1 if self.client_id is None else int(self.client_id)
+            rng = np.random.RandomState((self.spec.seed + 1000003 * client_seed) % (2 ** 32))
+            return set(int(index) for index in rng.choice(eligible, count, replace=False))
         count = max(1, int(math.floor(len(eligible) * self.spec.poison_ratio)))
         generator = torch.Generator(device="cpu")
         client_seed = -1 if self.client_id is None else int(self.client_id)
@@ -202,8 +243,9 @@ class BackdoorAttack:
         height, width = x.shape[-2:]
         size = min(self.spec.patch_size, height, width)
         location = self.spec.patch_location.lower()
-        top = 0 if "upper" in location else height - size
-        left = 0 if "left" in location else width - size
+        margin = min(self.spec.patch_margin, height - size, width - size)
+        top = margin if "upper" in location else height - margin - size
+        left = margin if "left" in location else width - margin - size
         return top, left, size
 
     def _fragment_mask(self, x: torch.Tensor, union: bool) -> torch.Tensor:

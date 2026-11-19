@@ -216,3 +216,12 @@ python main.py -algo FedSGD -data MNIST_100 -m FedAvgMLP -nc 100 -jr 1 -gr 500 -
 ## 报告要求
 
 至少同时报告 clean accuracy、攻击后 accuracy、恶意接受率、恶意屏蔽率、良性误屏蔽率及每轮实际上传人数。对于 `trimmedmean`、`median`、`bulyan`，还应标注其为坐标级处理，不能将 audit 中的“accepted 客户端数”误解释为所有参数均完整参与聚合。对 untargeted 攻击，ASR 没有语义；应报告 accuracy drop，而不是把零 ASR 当作安全结论。
+
+
+## BadNets reference preset
+
+BadNets defaults to `--backdoor_preset reference`: count poisoning against all local records, select eligible non-target records with fixed per-client NumPy RandomState indices, and stamp a 4×4 white square at the lower-right with a one-pixel margin. Defaults are poison ratio 0.2, target label 0, and backdoor seed 0. The selected count is capped by the eligible set; a positive ratio selects at least one record when eligible records exist.
+
+Use `--backdoor_preset legacy` to retain the earlier eligible-record denominator, per-round resampling, and trigger defaults. Other backdoor methods retain their previous behavior. The single-teacher legacy helper explicitly uses its historical 10% eligible-record setting, while the native legacy preset keeps its earlier 25% default.
+
+See the [single-teacher guide](../../../docs/single-teacher-datafree.md) and [federated ZSKT guide](../../../docs/federated-zskt.md) for entry points, data requirements, compatibility boundaries, and poison-index audits.

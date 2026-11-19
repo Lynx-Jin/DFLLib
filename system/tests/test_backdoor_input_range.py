@@ -17,6 +17,7 @@ class BackdoorInputRangeTest(unittest.TestCase):
             backdoor_end_round=-1,
             backdoor_patch_size=1,
             backdoor_patch_location="upper_left",
+            backdoor_patch_margin=0,
             backdoor_blend_alpha=0.2,
             backdoor_dba_fragments=4,
             backdoor_seed=0,

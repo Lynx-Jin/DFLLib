@@ -11,6 +11,8 @@ import torchvision
 import logging
 
 from flcore.servers.serveravg import FedAvg
+from flcore.servers.serveravgzskt import (FedAvgZSKT, add_federated_zskt_args,
+                                           validate_federated_zskt_options)
 from flcore.servers.serverfedsgd import FedSGD
 from flcore.servers.serverpFedMe import pFedMe
 from flcore.servers.serverperavg import PerAvg
@@ -117,9 +119,11 @@ def validate_security_options(args):
     args.attack_type = attack_names[attack_key]
     if not 0 <= args.attack_malicious_ratio <= 1 or args.attack_seed < 0:
         raise ValueError("Require malicious ratio in [0, 1] and a nonnegative attack seed")
+    from flcore.security.backdoor import resolve_backdoor_defaults
+    resolve_backdoor_defaults(args)
     if args.backdoor != "none":
-        if args.algorithm not in ("FedAvg", "FedSGD"):
-            raise ValueError("Image-backdoor round and update hooks currently support FedAvg and FedSGD")
+        if args.algorithm not in ("FedAvg", "FedSGD", "FedAvgZSKT"):
+            raise ValueError("Image-backdoor round hooks support FedAvg, FedSGD and FedAvgZSKT")
         if args.attack_type == "poisonedfl":
             raise ValueError("PoisonedFL skips local training, which image backdoors require")
         if not 0 <= args.backdoor_target_label < args.num_classes:
@@ -128,7 +132,7 @@ def validate_security_options(args):
             raise ValueError("Backdoor source label must be -1 or a configured class")
         if not 0 <= args.backdoor_poison_ratio <= 1 or not 0 <= args.backdoor_blend_alpha <= 1:
             raise ValueError("Backdoor poison ratio and blend alpha must lie in [0, 1]")
-        if args.backdoor_patch_size < 1 or args.backdoor_dba_fragments < 1:
+        if args.backdoor_patch_size < 1 or args.backdoor_patch_margin < 0 or args.backdoor_dba_fragments < 1:
             raise ValueError("Backdoor patch size and fragment count must be positive")
         if (args.backdoor_start_round < 0 or args.backdoor_end_round < -1
                 or 0 <= args.backdoor_end_round < args.backdoor_start_round):
@@ -187,6 +191,9 @@ def run(args):
         print(f"\n============= Running time: {i}th =============")
         print("Creating server and clients ...")
         start = time.time()
+
+        if args.algorithm == "FedAvgZSKT":
+            torch.manual_seed(args.zskt_seed + i)
 
         # Generate args.model
         if model_str == "MLR": # convex
@@ -325,6 +332,9 @@ def run(args):
             args.model = _split_classifier_head(args.model)
             args.head = args.model.head
             server = FedAvg(args, i) if args.algorithm == "FedAvg" else FedSGD(args, i)
+
+        elif args.algorithm == "FedAvgZSKT":
+            server = FedAvgZSKT(args, i)
 
         elif args.algorithm == "Local":
             server = Local(args, i)
@@ -715,17 +725,21 @@ if __name__ == "__main__":
                         help='Target label for triggered-ASR evaluation')
     parser.add_argument('--backdoor_source_label', type=int, default=-1,
                         help='Source label; -1 means all non-target test inputs')
-    parser.add_argument('--backdoor_poison_ratio', type=float, default=0.25,
-                        help='Fraction of eligible examples poisoned on an active malicious client')
+    parser.add_argument('--backdoor_preset', choices=['reference', 'legacy'], default='reference',
+                        help='BadNets reference: fixed indices, all-local count, 4x4 lower-right margin1')
+    parser.add_argument('--backdoor_poison_ratio', type=float, default=None,
+                        help='Reference BadNets counts all local records; legacy counts eligible records')
     parser.add_argument('--backdoor_start_round', type=int, default=0,
                         help='First active communication round for the backdoor')
     parser.add_argument('--backdoor_end_round', type=int, default=-1,
                         help='Last active communication round; -1 means through training')
-    parser.add_argument('--backdoor_patch_size', type=int, default=5,
+    parser.add_argument('--backdoor_patch_size', type=int, default=None,
                         help='Square trigger side length in pixels')
-    parser.add_argument('--backdoor_patch_location', type=str, default='upper_left',
+    parser.add_argument('--backdoor_patch_location', type=str, default=None,
                         choices=['upper_left', 'upper_right', 'lower_left', 'lower_right'],
                         help='Patch trigger placement')
+    parser.add_argument('--backdoor_patch_margin', type=int, default=None,
+                        help='Patch border margin; reference BadNets uses one pixel')
     parser.add_argument('--backdoor_blend_alpha', type=float, default=0.2,
                         help='Blend/reflection trigger opacity')
     parser.add_argument('--backdoor_dba_fragments', type=int, default=4,
@@ -819,9 +833,12 @@ if __name__ == "__main__":
     parser.add_argument('-pp_seed', "--proto_probe_seed", type=int, default=0,
                         help="Round-deterministic random probe seed")
 
+    add_federated_zskt_args(parser)
+
     args = parser.parse_args()
     try:
         validate_security_options(args)
+        validate_federated_zskt_options(args)
     except ValueError as error:
         parser.error(str(error))
     experiment_logger = setup_experiment_logger(args)
