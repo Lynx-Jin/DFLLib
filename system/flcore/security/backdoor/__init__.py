@@ -6,7 +6,8 @@ latter contains server-side simulations of Byzantine *update* attacks
 clients train on and how their submitted model is produced.
 """
 
-from flcore.security.backdoor.core import BackdoorAttack, BackdoorDataset, build_backdoor_attack
+from flcore.security.backdoor.core import (BackdoorAttack, BackdoorDataset, build_backdoor_attack,
+                                           resolve_backdoor_defaults)
 from flcore.security.backdoor.evaluator import BackdoorEvaluator
 
-__all__ = ["BackdoorAttack", "BackdoorDataset", "BackdoorEvaluator", "build_backdoor_attack"]
+__all__ = ["BackdoorAttack", "BackdoorDataset", "BackdoorEvaluator", "build_backdoor_attack", "resolve_backdoor_defaults"]

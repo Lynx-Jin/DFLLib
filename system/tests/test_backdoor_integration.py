@@ -151,7 +151,8 @@ class BackdoorIntegrationTest(unittest.TestCase):
                 patched = images[:, 0, 0, 0]
                 return torch.stack((patched - 0.75, 0.75 - patched), dim=1)
 
-        with image_server() as server:
+        with image_server(extra=("--backdoor_patch_location", "upper_left",
+                                 "--backdoor_patch_margin", "0")) as server:
             model = PatchClassifier().train()
             evaluator = BackdoorEvaluator(server.backdoor_evaluator.attack, torch.device("cpu"))
             client = server.clients[0]

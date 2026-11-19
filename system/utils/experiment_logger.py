@@ -1,4 +1,4 @@
-﻿"""Create one self-contained directory and terminal transcript per experiment."""
+"""Create one self-contained directory and terminal transcript per experiment."""
 
 import atexit
 import json
@@ -16,7 +16,7 @@ def _safe(value):
 
 def build_experiment_name(args, timestamp=None):
     timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    actual_rounds = int(args.global_rounds) + 1
+    actual_rounds = int(args.global_rounds) + (0 if args.algorithm == "FedAvgZSKT" else 1)
     malicious_clients = int(args.num_clients * args.attack_malicious_ratio)
     fields = [
         timestamp,
@@ -32,6 +32,8 @@ def build_experiment_name(args, timestamp=None):
         f"dev-{_safe(args.attack_deviation)}",
         f"seed{args.attack_seed}",
     ]
+    if args.algorithm == "FedAvgZSKT":
+        fields.extend([f"kd{args.zskt_cycles_per_round}", _safe(args.goal)])
     return "_".join(fields)
 
 

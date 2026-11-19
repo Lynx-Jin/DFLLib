@@ -34,6 +34,8 @@ terminal_output.txt
 # Generated client datasets.  Keep the top-level generator scripts and
 # dataset/utils source code so a clone can regenerate these files locally.
 /dataset/*/
+# CIFAR client-cache symlinks are generated data too.
+/dataset/Cifar10*
 !/dataset/utils/
 !/dataset/utils/**
 
